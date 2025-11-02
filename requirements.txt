@@ -7,3 +7,4 @@ PyPDF2
 docx2pdf
 pywin32
 customtkinter
+reportlab

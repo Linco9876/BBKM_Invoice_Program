@@ -1,8 +1,14 @@
 import os
-import sys
+import re
+import textwrap
+from email import policy
+from email.parser import BytesParser
+from html import unescape
+
 from docx2pdf import convert
 from PIL import Image
-import win32com.client
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 import shutil
 import pandas as pd
 
@@ -22,7 +28,7 @@ def convert_to_pdf(file_path, output_pdf):
         if file_extension == '.docx':
             convert(file_path, output_pdf)
         elif file_extension == '.doc':
-            word = win32com.client.Dispatch("Word.Application")
+            word = _get_win32_dispatch()("Word.Application")
             word.Visible = False
             word.DisplayAlerts = False
             doc = word.Documents.Open(file_path)
@@ -32,7 +38,7 @@ def convert_to_pdf(file_path, output_pdf):
 
         # --- Excel / CSV ---
         elif file_extension in ['.xlsx', '.xls', '.csv']:
-            excel = win32com.client.Dispatch("Excel.Application")
+            excel = _get_win32_dispatch()("Excel.Application")
             excel.Visible = False
             excel.DisplayAlerts = False
             wb = excel.Workbooks.Open(file_path)
@@ -44,7 +50,7 @@ def convert_to_pdf(file_path, output_pdf):
 
         # --- Text formats ---
         elif file_extension in ['.txt', '.rtf', '.odt', '.html']:
-            word = win32com.client.Dispatch("Word.Application")
+            word = _get_win32_dispatch()("Word.Application")
             word.Visible = False
             word.DisplayAlerts = False
             doc = word.Documents.Open(file_path)
@@ -59,10 +65,7 @@ def convert_to_pdf(file_path, output_pdf):
 
         # --- EML (Outlook email message) ---
         elif file_extension == '.eml':
-            outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
-            msg = outlook.OpenSharedItem(file_path)
-            msg.SaveAs(output_pdf, 17)  # 17 = PDF
-            msg = None
+            convert_eml_to_pdf(file_path, output_pdf)
 
         # --- Already PDF ---
         elif file_extension == '.pdf':
@@ -115,6 +118,103 @@ def convert_files_to_pdf(folder_path, saved_attachments):
                 print(f"Failed to move unsupported {filename}: {e}")
 
     return updated_saved_attachments
+
+def _get_win32_dispatch():
+    try:
+        from win32com.client import Dispatch  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "The pywin32 package is required to convert Word, Excel, and text-based files."
+        ) from exc
+    return Dispatch
+
+def convert_eml_to_pdf(file_path, output_pdf):
+    with open(file_path, 'rb') as eml_file:
+        message = BytesParser(policy=policy.default).parse(eml_file)
+
+    body_text = _extract_eml_body(message)
+    header_lines = _format_eml_headers(message)
+
+    _render_text_to_pdf(header_lines + [""] + body_text.splitlines(), output_pdf)
+
+def _extract_eml_body(message):
+    text_parts = []
+    html_parts = []
+
+    for part in message.walk():
+        if part.get_content_maintype() == 'multipart':
+            continue
+
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            continue
+
+        charset = part.get_content_charset() or 'utf-8'
+        try:
+            decoded_payload = payload.decode(charset, errors='replace')
+        except LookupError:
+            decoded_payload = payload.decode('utf-8', errors='replace')
+
+        content_type = part.get_content_type()
+        if content_type == 'text/plain':
+            text_parts.append(decoded_payload)
+        elif content_type == 'text/html':
+            html_parts.append(decoded_payload)
+
+    if text_parts:
+        return "\n\n".join(text_parts).strip()
+
+    for html in html_parts:
+        text = _html_to_text(html)
+        if text:
+            return text
+
+    payload = message.get_payload(decode=True)
+    if payload:
+        charset = message.get_content_charset() or 'utf-8'
+        try:
+            return payload.decode(charset, errors='replace').strip()
+        except LookupError:
+            return payload.decode('utf-8', errors='replace').strip()
+
+    return "(No content)"
+
+def _html_to_text(html_content):
+    text = re.sub(r'<(br|p)[^>]*?>', '\n', html_content, flags=re.IGNORECASE)
+    text = re.sub(r'<style.*?>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<script.*?>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = unescape(text)
+    return text.strip()
+
+def _format_eml_headers(message):
+    headers = []
+    for label in ['Subject', 'From', 'To', 'Date']:
+        value = message.get(label, '')
+        if value:
+            headers.append(f"{label}: {value}")
+    return headers
+
+def _render_text_to_pdf(lines, output_pdf):
+    pdf = canvas.Canvas(output_pdf, pagesize=letter)
+    width, height = letter
+    x_margin = 72
+    y_margin = 72
+    max_width = width - (2 * x_margin)
+    line_height = 14
+
+    y_position = height - y_margin
+
+    for line in lines:
+        wrapped_lines = textwrap.wrap(line, width=int(max_width / 7)) or ['']
+        for wrapped_line in wrapped_lines:
+            if y_position < y_margin:
+                pdf.showPage()
+                y_position = height - y_margin
+            pdf.drawString(x_margin, y_position, wrapped_line)
+            y_position -= line_height
+
+    pdf.save()
 
 def main():
     folder_path = r'C:\BBKM_InvoiceSorter\Invoices'
