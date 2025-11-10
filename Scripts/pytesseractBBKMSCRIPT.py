@@ -10,7 +10,15 @@ from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 from pytesseract import image_to_string, pytesseract
 from PIL import Image, ImageEnhance
-import win32com.client
+from typing import Dict, Optional, Tuple
+
+from save_attachments_from_outlook_folder import (
+    GraphEmailProxy,
+    _find_mail_folder_id,
+    _get_access_token as _graph_get_access_token,
+    _make_session as _graph_make_session,
+    _move_message,
+)
 
 pytesseract.tesseract_cmd = r"C:\BBKM_InvoiceSorter\Library\Tesseract-OCR\tesseract.exe"
 
@@ -86,30 +94,41 @@ def find_name_match(name, text, proximity=5):
 
     return False
 
+_GRAPH_FOLDER_CACHE: Dict[str, str] = {}
+
+
+def _ensure_graph_handles(
+    email: Optional[GraphEmailProxy],
+) -> Tuple[object, str]:
+    session = getattr(email, "_session", None) if email else None
+    token = getattr(email, "_access_token", None) if email else None
+
+    if session and token:
+        return session, token
+
+    session = _graph_make_session()
+    token = _graph_get_access_token()
+
+    if email:
+        setattr(email, "_session", session)
+        setattr(email, "_access_token", token)
+
+    return session, token
+
+
 def move_email(email, subfolder_name, filename):
     try:
         if email and not email.IsConflict:
-            outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
-            recipient = outlook.CreateRecipient("accounts@bbkm.com.au")
-            if not recipient.Resolve():
-                print("Could not resolve shared mailbox.")
-                return
+            session, token = _ensure_graph_handles(email)
+            cache_key = subfolder_name.strip().casefold()
+            folder_id = _GRAPH_FOLDER_CACHE.get(cache_key)
+            if not folder_id:
+                folder_id = _find_mail_folder_id(
+                    session, token, display_name=subfolder_name
+                )
+                _GRAPH_FOLDER_CACHE[cache_key] = folder_id
 
-            # Get the root of the shared mailbox
-            shared_root = outlook.GetSharedDefaultFolder(recipient, 6).Parent
-
-            # Search folders at the top level of the shared mailbox
-            target_folder = None
-            for folder in shared_root.Folders:
-                if folder.Name.strip().lower() == subfolder_name.strip().lower():
-                    target_folder = folder
-                    break
-
-            if not target_folder:
-                print(f"Folder '{subfolder_name}' not found at top level of shared mailbox.")
-                return
-
-            email.Move(target_folder)
+            _move_message(session, token, email.id, folder_id)
         else:
             print(f"Email.IsConflict is True for file: {filename}")
     except Exception as e:
