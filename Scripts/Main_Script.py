@@ -2,11 +2,13 @@ import os
 import time
 import sys
 import threading
-from save_attachments_from_outlook_folder import save_attachments_from_outlook_folder
+from save_attachments_from_outlook_folder import (
+    forward_emails_with_categories,
+    save_attachments_from_outlook_folder,
+)
 from convert_files_to_pdf import convert_files_to_pdf
 from pytesseractBBKMSCRIPT import pytesseract_main
 from Move_to_OneDrive import move_files
-from forward_emails import forward_emails_with_categories
 import builtins
 import datetime
 

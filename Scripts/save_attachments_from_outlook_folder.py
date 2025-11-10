@@ -1,21 +1,32 @@
+import argparse
 import base64
 import json
 import os
 import re
 import shutil
 import filecmp
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from msal import ConfidentialClientApplication
 from requests.adapters import HTTPAdapter, Retry
 
-save_path = "C:\\BBKM_InvoiceSorter\\Invoices"
+DEFAULT_SAVE_PATH = "C:\\BBKM_InvoiceSorter\\Invoices"
 
 GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 USER_EMAIL = os.getenv("OUTLOOK_USER_EMAIL", "accounts@bbkm.com.au")
+
+DEFAULT_FORWARD_CATEGORIES = [
+    "Service Agreement",
+    "Reminder",
+    "Quote",
+    "Remittance",
+    "Statement",
+    "Caution Email",
+    "Credit Adj",
+]
 
 
 class GraphEmailProxy:
@@ -581,3 +592,62 @@ def forward_emails_with_categories(
             continue
 
         print(f"Copied: '{email.Subject}' to '{to_address}'.")
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """Command line entry point for saving attachments or forwarding emails."""
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Download attachments from the shared inbox or forward categorised "
+            "emails using Microsoft Graph."
+        )
+    )
+    parser.add_argument(
+        "--forward",
+        action="store_true",
+        help=(
+            "Forward emails that match the supplied categories instead of "
+            "downloading attachments."
+        ),
+    )
+    parser.add_argument(
+        "--to-address",
+        default="info@bbkm.com.au",
+        help="Destination email address for forwarded messages.",
+    )
+    parser.add_argument(
+        "--category",
+        dest="categories",
+        action="append",
+        metavar="NAME",
+        help=(
+            "Category to match when forwarding emails. Provide multiple times "
+            "to include more than one category. Defaults to the standard "
+            "processing list."
+        ),
+    )
+    parser.add_argument(
+        "--folder",
+        default="invoices",
+        help="Source folder name when downloading attachments.",
+    )
+    parser.add_argument(
+        "--destination",
+        default=DEFAULT_SAVE_PATH,
+        metavar="PATH",
+        help="Filesystem path for saving attachments.",
+    )
+
+    args = parser.parse_args(argv)
+
+    if args.forward:
+        categories = args.categories or DEFAULT_FORWARD_CATEGORIES
+        forward_emails_with_categories(args.to_address, categories)
+        return
+
+    save_attachments_from_outlook_folder(args.folder, args.destination)
+
+
+if __name__ == "__main__":
+    main()
