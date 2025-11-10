@@ -13,7 +13,10 @@ from customtkinter import *
 from tkinter import messagebox
 from Main_Script import main
 
-CSV_FILE_PATH = "C:\\Users\\Administrator\\Better Bookkeeping Management\\BBKM - Documents\\BBKM Plan Management\\Client Names.csv"
+CSV_FILE_PATH = (
+    "C:\\Users\\Administrator\\Better Bookkeeping Management\\BBKM - Documents\\"
+    "BBKM Plan Management\\Client Names.csv"
+)
 
 class App:
     def __init__(self, root, stop_flag):
@@ -26,12 +29,17 @@ class App:
         # Initialize script_thread as None
         self.script_thread = None
 
+        self.status_var = tk.StringVar(value="Status: Idle")
+
         self.main_button = CTkButton(root, text="Run Invoice Sorter", command=self.run_in_thread)
         self.main_button.pack(fill="x", padx=10, pady=10)
 
         self.stop_button = CTkButton(root, text="Stop Invoice Sorter", command=self.stop_main)
         self.stop_button.pack(fill="x", padx=10, pady=10)
         self.stop_button.configure(state="disabled")  # Disable the "Stop Invoice Sorter" button initially
+
+        self.status_label = CTkLabel(root, textvariable=self.status_var)
+        self.status_label.pack(fill="x", padx=10, pady=(0, 10))
         self.name_label = CTkLabel(root, text="Enter New Names and Codes Below")
         self.name_label.pack(padx=10, pady=5)
 
@@ -83,11 +91,8 @@ class App:
         # Create a queue for communication
         self.queue = queue.Queue()
 
-    def copy_selected_name(self, event):
-        selected_index = self.client_listbox.curselection()
-        if selected_index:
-            selected_name = self.client_listbox.get(selected_index)
-            pyperclip.copy(selected_name)
+        # Populate the treeview when the GUI loads
+        self.populate_client_listbox()
 
     def clear_name_entry(self, event):
         if self.name_entry.get() == "Enter name...":
@@ -199,19 +204,19 @@ class App:
     def copy_selected_name(self):
         cur_item = self.client_treeview.focus()
         if cur_item:
-            selected_name = self.client_treeview.item(cur_item)['values'][0]
+            selected_name = self.client_treeview.item(cur_item)["values"][0]
             pyperclip.copy(selected_name)
 
     def copy_selected_code(self):
         cur_item = self.client_treeview.focus()
         if cur_item:
-            selected_code = self.client_treeview.item(cur_item)['values'][1]
+            selected_code = self.client_treeview.item(cur_item)["values"][1]
             pyperclip.copy(selected_code)
 
     def copy_selected_both(self):
         cur_item = self.client_treeview.focus()
         if cur_item:
-            selected_code, selected_name = self.client_treeview.item(cur_item)['values']
+            selected_name, selected_code = self.client_treeview.item(cur_item)["values"]
             selected_both = f"{selected_code} - {selected_name}"
             pyperclip.copy(selected_both)
 
@@ -222,6 +227,8 @@ class App:
             # Enable the "Run Invoice Sorter" button and disable the "Stop Invoice Sorter" button
             self.main_button.configure(state="normal")
             self.stop_button.configure(state="disabled")
+            if self.status_var.get() != "Status: Stopped":
+                self.status_var.set("Status: Idle")
         else:
             # The script is still running, schedule another check
             self.root.after(100, self.check_script_finished)
@@ -241,12 +248,19 @@ class App:
                 with open("log.txt", "a") as file:
                     file.write(f"[{timestamp}] {log}\n")
 
+        self.root.after(500, self.update_log)
+
     def run_in_thread(self):
+        if self.script_thread and self.script_thread.is_alive():
+            return
+
+        self.stop_flag.clear()
         self.queue = queue.Queue()  # Create a queue to communicate with the main thread
-        self.script_thread = threading.Thread(target=self.run_main)
+        self.script_thread = threading.Thread(target=self.run_main, daemon=True)
         self.script_thread.start()
         self.main_button.configure(state="disabled")  # Disable the "Run Invoice Sorter" button
         self.stop_button.configure(state="normal")  # Enable the "Stop Invoice Sorter" button
+        self.status_var.set("Status: Running")
         self.root.after(100, self.check_script_finished)  # Start checking if the script has finished
         self.root.after(100, self.update_log)  # Start updating the log periodically
 
@@ -259,21 +273,21 @@ class App:
         if self.script_thread:
             self.script_thread.join()  # Wait for the script thread to finish
             self.script_thread = None  # Reset the script thread
+        self.stop_flag.clear()
         self.main_button.configure(state="normal")
+        self.status_var.set("Status: Stopped")
 
     def run_main(self):
         pythoncom.CoInitialize()  # Initialize the COM library
         print("Running main script...")
-        # Reset flag at the start of the script
-        self.should_stop = False
         try:
-             main(self.stop_flag)  # Pass the stop flag to the main script
+            main(self.stop_flag)  # Pass the stop flag to the main script
         except Exception as e:
             print(f"Error occurred: {e}")
         finally:
             print("Main script finished")
             self.queue.put(None)  # Put a None value in the queue to signal the end of logs
-
+            self.status_var.set("Status: Idle")
 
 set_appearance_mode("dark")
 set_default_color_theme("dark-blue")
