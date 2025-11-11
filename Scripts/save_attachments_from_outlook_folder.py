@@ -1,21 +1,41 @@
+import argparse
 import base64
 import json
 import os
 import re
 import shutil
 import filecmp
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from msal import ConfidentialClientApplication
 from requests.adapters import HTTPAdapter, Retry
 
-save_path = "C:\\BBKM_InvoiceSorter\\Invoices"
+DEFAULT_SAVE_PATH = "C:\\BBKM_InvoiceSorter\\Invoices"
 
 GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 USER_EMAIL = os.getenv("OUTLOOK_USER_EMAIL", "accounts@bbkm.com.au")
+
+DEFAULT_FORWARD_CATEGORIES = [
+    "Service Agreement",
+    "Reminder",
+    "Quote",
+    "Remittance",
+    "Statement",
+    "Caution Email",
+    "Credit Adj",
+]
+
+
+class ForwardingError(RuntimeError):
+    """Exception raised when forwarding a message fails."""
+
+    def __init__(self, message: str, *, status_code: Optional[int] = None, permission_denied: bool = False):
+        super().__init__(message)
+        self.status_code = status_code
+        self.permission_denied = permission_denied
 
 
 class GraphEmailProxy:
@@ -148,10 +168,13 @@ def _get_message_details(session: requests.Session, token: str, message_id: str)
     return response.json()
 
 
-def _list_inbox_messages(session: requests.Session, token: str) -> List[Dict[str, object]]:
+def _list_inbox_messages(
+    session: requests.Session, token: str, *, newest_first: bool = False
+) -> List[Dict[str, object]]:
+    order = "desc" if newest_first else "asc"
     url = (
         f"{GRAPH_BASE}/users/{USER_EMAIL}/mailFolders/inbox/messages"
-        "?$orderby=receivedDateTime asc"
+        f"?$orderby=receivedDateTime {order}"
         "&$select=id,subject,from,categories,flag,hasAttachments,isRead"
         "&$top=50"
     )
@@ -179,6 +202,158 @@ def _list_attachments(session: requests.Session, token: str, message_id: str) ->
         attachments.extend(payload.get("value", []))
         url = payload.get("@odata.nextLink")
     return attachments
+
+
+def _find_mail_folder_id(
+    session: requests.Session, token: str, *, display_name: str
+) -> str:
+    """Return the folder id that matches ``display_name`` (case-insensitive)."""
+
+    target = display_name.casefold()
+    url = f"{GRAPH_BASE}/users/{USER_EMAIL}/mailFolders?$top=200"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    while url:
+        response = session.get(url, headers=headers, timeout=60)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Failed to list mail folders: {response.status_code} {response.text[:200]}"
+            )
+
+        payload = response.json()
+        for folder in payload.get("value", []):
+            name = (folder.get("displayName") or "").casefold()
+            if name == target:
+                folder_id = folder.get("id")
+                if folder_id:
+                    return folder_id
+
+        url = payload.get("@odata.nextLink")
+
+    raise RuntimeError(f"Unable to locate folder named '{display_name}' for {USER_EMAIL}")
+
+
+def _move_message(
+    session: requests.Session, token: str, message_id: str, destination_id: str
+) -> None:
+    url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{message_id}/move"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    body = json.dumps({"destinationId": destination_id})
+    response = session.post(url, headers=headers, data=body, timeout=60)
+    if response.status_code in (200, 201):
+        return
+
+    if response.status_code == 404:
+        # Message may have been moved or deleted by another agent between listing and action.
+        return
+
+    raise RuntimeError(
+        f"Failed to move message {message_id}: {response.status_code} {response.text[:200]}"
+    )
+
+
+def _ensure_attachment_content(
+    session: requests.Session,
+    token: str,
+    message_id: str,
+    attachment: Dict[str, object],
+) -> str:
+    content = attachment.get("contentBytes")
+    if content:
+        return str(content)
+
+    attachment_id = attachment.get("id")
+    if not attachment_id:
+        raise RuntimeError("Attachment is missing both inline content and an identifier")
+
+    att_url = (
+        f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{message_id}/attachments/{attachment_id}/$value"
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    response = session.get(att_url, headers=headers, timeout=60)
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Failed to download attachment {attachment_id}: {response.status_code} {response.text[:200]}"
+        )
+    return base64.b64encode(response.content).decode("ascii")
+
+
+def _send_message_copy(
+    session: requests.Session,
+    token: str,
+    email: GraphEmailProxy,
+    to_address: str,
+    attachments: List[Dict[str, object]],
+) -> None:
+    mail_attachments: List[Dict[str, object]] = []
+
+    for attachment in attachments:
+        odata_type = (attachment.get("@odata.type") or "").lower()
+        if "fileattachment" not in odata_type:
+            continue
+
+        name = attachment.get("name") or "attachment"
+        content_type = attachment.get("contentType") or "application/octet-stream"
+        content_bytes = _ensure_attachment_content(session, token, email.id, attachment)
+
+        mail_attachments.append(
+            {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": name,
+                "contentType": content_type,
+                "contentBytes": content_bytes,
+            }
+        )
+
+    send_url = f"{GRAPH_BASE}/users/{USER_EMAIL}/sendMail"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "message": {
+            "subject": email.Subject,
+            "body": {"contentType": "HTML", "content": email.Body},
+            "toRecipients": [{"emailAddress": {"address": to_address}}],
+        },
+        "saveToSentItems": False,
+    }
+
+    if mail_attachments:
+        body["message"]["attachments"] = mail_attachments
+
+    response = session.post(send_url, headers=headers, data=json.dumps(body), timeout=60)
+    if response.status_code in (202, 200):
+        return
+
+    if response.status_code == 403:
+        forward_url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{email.id}/forward"
+        forward_headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        forward_body = {
+            "comment": "",
+            "toRecipients": [{"emailAddress": {"address": to_address}}],
+        }
+        forward_response = session.post(
+            forward_url, headers=forward_headers, data=json.dumps(forward_body), timeout=60
+        )
+        if forward_response.status_code in (202, 200, 204):
+            return
+
+        raise ForwardingError(
+            "Failed to send message copy: "
+            f"403 {response.text[:200]} and forward fallback "
+            f"{forward_response.status_code} {forward_response.text[:200]}",
+            status_code=403,
+            permission_denied=True,
+        )
+
+    raise ForwardingError(
+        f"Failed to send message copy: {response.status_code} {response.text[:200]}",
+        status_code=response.status_code,
+    )
 
 
 def _strip_html(text: str) -> str:
@@ -395,3 +570,141 @@ def save_attachments_from_outlook_folder(
         break
 
     return saved_attachments, email_file_map
+
+
+def forward_emails_with_categories(
+    to_address: str, categories: List[str]
+) -> None:
+    """Replicate the forwarding workflow using the Microsoft Graph API."""
+
+    if not categories:
+        return
+
+    token = _get_access_token()
+    session = _make_session()
+
+    complete_invoices_id = _find_mail_folder_id(
+        session, token, display_name="Complete Invoices"
+    )
+
+    category_targets = {category.casefold() for category in categories}
+
+    messages = _list_inbox_messages(session, token, newest_first=True)
+
+    for basic_message in messages:
+        raw_categories = basic_message.get("categories")
+        if not raw_categories:
+            continue
+
+        if isinstance(raw_categories, list):
+            message_categories = {str(value).casefold() for value in raw_categories}
+        else:
+            message_categories = {str(raw_categories).casefold()}
+
+        if not (message_categories & category_targets):
+            continue
+
+        message_details = _get_message_details(session, token, basic_message.get("id", ""))
+        email = GraphEmailProxy(session, token, message_details)
+
+        attachments: List[Dict[str, object]] = []
+        if basic_message.get("hasAttachments"):
+            attachments = _list_attachments(session, token, email.id)
+
+        try:
+            _send_message_copy(session, token, email, to_address, attachments)
+        except ForwardingError as exc:
+            print(
+                "Error copying '",
+                email.Subject,
+                "' to '",
+                to_address,
+                "': ",
+                f"{exc}",
+                sep="",
+            )
+            failure_category = "Forward Failed" if exc.permission_denied else "Forward Error"
+            try:
+                email.Categories = failure_category
+                email.UnRead = False
+                email.Save()
+            except Exception as save_exc:  # noqa: BLE001 - log but continue
+                print(f"Error marking '{email.Subject}' as {failure_category}: {save_exc}")
+            continue
+        except Exception as exc:  # noqa: BLE001 - preserve behaviour and logging
+            print(f"Error copying '{email.Subject}' to '{to_address}': {exc}")
+            continue
+
+        email.UnRead = False
+        try:
+            email.Save()
+        except Exception as exc:  # noqa: BLE001 - continue processing other emails
+            print(f"Error updating '{email.Subject}': {exc}")
+
+        try:
+            _move_message(session, token, email.id, complete_invoices_id)
+            print(f"Moved: '{email.Subject}' to 'Complete Invoices'.")
+        except Exception as exc:  # noqa: BLE001 - continue processing other emails
+            print(f"Error moving '{email.Subject}' to 'Complete Invoices': {exc}")
+            continue
+
+        print(f"Copied: '{email.Subject}' to '{to_address}'.")
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """Command line entry point for saving attachments or forwarding emails."""
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Download attachments from the shared inbox or forward categorised "
+            "emails using Microsoft Graph."
+        )
+    )
+    parser.add_argument(
+        "--forward",
+        action="store_true",
+        help=(
+            "Forward emails that match the supplied categories instead of "
+            "downloading attachments."
+        ),
+    )
+    parser.add_argument(
+        "--to-address",
+        default="info@bbkm.com.au",
+        help="Destination email address for forwarded messages.",
+    )
+    parser.add_argument(
+        "--category",
+        dest="categories",
+        action="append",
+        metavar="NAME",
+        help=(
+            "Category to match when forwarding emails. Provide multiple times "
+            "to include more than one category. Defaults to the standard "
+            "processing list."
+        ),
+    )
+    parser.add_argument(
+        "--folder",
+        default="invoices",
+        help="Source folder name when downloading attachments.",
+    )
+    parser.add_argument(
+        "--destination",
+        default=DEFAULT_SAVE_PATH,
+        metavar="PATH",
+        help="Filesystem path for saving attachments.",
+    )
+
+    args = parser.parse_args(argv)
+
+    if args.forward:
+        categories = args.categories or DEFAULT_FORWARD_CATEGORIES
+        forward_emails_with_categories(args.to_address, categories)
+        return
+
+    save_attachments_from_outlook_folder(args.folder, args.destination)
+
+
+if __name__ == "__main__":
+    main()
