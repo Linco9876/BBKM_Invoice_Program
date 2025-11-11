@@ -29,6 +29,15 @@ DEFAULT_FORWARD_CATEGORIES = [
 ]
 
 
+class ForwardingError(RuntimeError):
+    """Exception raised when forwarding a message fails."""
+
+    def __init__(self, message: str, *, status_code: Optional[int] = None, permission_denied: bool = False):
+        super().__init__(message)
+        self.status_code = status_code
+        self.permission_denied = permission_denied
+
+
 class GraphEmailProxy:
     """Lightweight wrapper to mimic the few Outlook MailItem members we rely on."""
 
@@ -234,10 +243,16 @@ def _move_message(
     }
     body = json.dumps({"destinationId": destination_id})
     response = session.post(url, headers=headers, data=body, timeout=60)
-    if response.status_code not in (200, 201):
-        raise RuntimeError(
-            f"Failed to move message {message_id}: {response.status_code} {response.text[:200]}"
-        )
+    if response.status_code in (200, 201):
+        return
+
+    if response.status_code == 404:
+        # Message may have been moved or deleted by another agent between listing and action.
+        return
+
+    raise RuntimeError(
+        f"Failed to move message {message_id}: {response.status_code} {response.text[:200]}"
+    )
 
 
 def _ensure_attachment_content(
@@ -327,14 +342,17 @@ def _send_message_copy(
         if forward_response.status_code in (202, 200, 204):
             return
 
-        raise RuntimeError(
-            "Failed to send message copy for "
-            f"{email.id}: 403 {response.text[:200]} and forward fallback "
-            f"returned {forward_response.status_code} {forward_response.text[:200]}"
+        raise ForwardingError(
+            "Failed to send message copy: "
+            f"403 {response.text[:200]} and forward fallback "
+            f"{forward_response.status_code} {forward_response.text[:200]}",
+            status_code=403,
+            permission_denied=True,
         )
 
-    raise RuntimeError(
-        f"Failed to send message copy for {email.id}: {response.status_code} {response.text[:200]}"
+    raise ForwardingError(
+        f"Failed to send message copy: {response.status_code} {response.text[:200]}",
+        status_code=response.status_code,
     )
 
 
@@ -595,6 +613,24 @@ def forward_emails_with_categories(
 
         try:
             _send_message_copy(session, token, email, to_address, attachments)
+        except ForwardingError as exc:
+            print(
+                "Error copying '",
+                email.Subject,
+                "' to '",
+                to_address,
+                "': ",
+                f"{exc}",
+                sep="",
+            )
+            failure_category = "Forward Failed" if exc.permission_denied else "Forward Error"
+            try:
+                email.Categories = failure_category
+                email.UnRead = False
+                email.Save()
+            except Exception as save_exc:  # noqa: BLE001 - log but continue
+                print(f"Error marking '{email.Subject}' as {failure_category}: {save_exc}")
+            continue
         except Exception as exc:  # noqa: BLE001 - preserve behaviour and logging
             print(f"Error copying '{email.Subject}' to '{to_address}': {exc}")
             continue
