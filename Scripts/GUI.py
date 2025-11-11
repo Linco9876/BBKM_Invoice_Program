@@ -287,21 +287,26 @@ class App:
     def update_log(self):
         # Check if there are logs in the queue
         while not self.queue.empty():
-            log = self.queue.get()  # Get a log message from the queue
-            if log is None:
+            log_item = self.queue.get()  # Get a log message from the queue
+            if log_item is None:
                 continue
 
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Get current timestamp
-            log_with_timestamp = f"{timestamp} - {log}"  # Add timestamp to log message
+            if isinstance(log_item, tuple):
+                kind, payload = log_item
+            else:
+                kind, payload = "log", log_item
 
-            # Print the log with timestamp to the console
-            print(log_with_timestamp)
+            if kind != "log":
+                continue
 
-            # Write the log with timestamp to the log file
-            with open("log.txt", "a") as file:
-                file.write(f"[{timestamp}] {log}\n")
+            log_message = str(payload).strip()
+            if not log_message:
+                continue
 
-            self.append_log(log_with_timestamp)
+            with open("log.txt", "a", encoding="utf-8", errors="replace") as file:
+                file.write(log_message + "\n")
+
+            self.append_log(log_message)
 
         self.root.after(500, self.update_log)
 
@@ -342,7 +347,7 @@ class App:
         pythoncom.CoInitialize()  # Initialize the COM library
         print("Running main script...")
         try:
-            main(self.stop_flag)  # Pass the stop flag to the main script
+            main(self.stop_flag, self.queue)  # Pass the stop flag and log queue to the main script
         except Exception as e:
             print(f"Error occurred: {e}")
         finally:
