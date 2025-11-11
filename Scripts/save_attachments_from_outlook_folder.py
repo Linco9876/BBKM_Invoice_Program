@@ -311,10 +311,31 @@ def _send_message_copy(
         body["message"]["attachments"] = mail_attachments
 
     response = session.post(send_url, headers=headers, data=json.dumps(body), timeout=60)
-    if response.status_code not in (202, 200):
-        raise RuntimeError(
-            f"Failed to send message copy for {email.id}: {response.status_code} {response.text[:200]}"
+    if response.status_code in (202, 200):
+        return
+
+    if response.status_code == 403:
+        forward_url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{email.id}/forward"
+        forward_headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        forward_body = {
+            "comment": "",
+            "toRecipients": [{"emailAddress": {"address": to_address}}],
+        }
+        forward_response = session.post(
+            forward_url, headers=forward_headers, data=json.dumps(forward_body), timeout=60
         )
+        if forward_response.status_code in (202, 200, 204):
+            return
+
+        raise RuntimeError(
+            "Failed to send message copy for "
+            f"{email.id}: 403 {response.text[:200]} and forward fallback "
+            f"returned {forward_response.status_code} {forward_response.text[:200]}"
+        )
+
+    raise RuntimeError(
+        f"Failed to send message copy for {email.id}: {response.status_code} {response.text[:200]}"
+    )
 
 
 def _strip_html(text: str) -> str:
