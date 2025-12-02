@@ -42,6 +42,43 @@ class ForwardingError(RuntimeError):
 class AuthConfigurationError(RuntimeError):
     """Exception raised when authentication cannot succeed without operator action."""
 
+
+_env_loaded = False
+
+
+def _load_env_from_file() -> None:
+    """Optionally load Azure credentials from a .env-style file.
+
+    If ``AZURE_ENV_FILE`` points to a file containing ``KEY=VALUE`` lines, the
+    values are loaded into ``os.environ`` (without overriding any variables that
+    are already set). This allows operators to provide secrets locally without
+    hard-coding them in the repository or shell profile.
+    """
+
+    global _env_loaded
+
+    if _env_loaded:
+        return
+
+    env_path = os.getenv("AZURE_ENV_FILE")
+    if not env_path:
+        return
+
+    if not os.path.exists(env_path):
+        raise RuntimeError(f"AZURE_ENV_FILE is set but {env_path} does not exist")
+
+    with open(env_path, "r", encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip())
+
+    _env_loaded = True
+
 class GraphEmailProxy:
     """Lightweight wrapper to mimic the few Outlook MailItem members we rely on."""
 
@@ -157,6 +194,7 @@ def _make_session() -> requests.Session:
 
 
 def _get_access_token() -> str:
+    _load_env_from_file()
     authority = f"https://login.microsoftonline.com/{_ensure_env('AZURE_TENANT_ID')}"
     app = ConfidentialClientApplication(
         _ensure_env("AZURE_CLIENT_ID"),
