@@ -50,9 +50,14 @@ def _load_env_from_file() -> None:
     """Optionally load Azure credentials from a .env-style file.
 
     Precedence is as follows:
-    1. If ``AZURE_ENV_FILE`` is set, load from that path (erroring if missing).
-    2. Otherwise, if a ``.env`` file sits alongside this script, load from it.
-    3. Values already present in ``os.environ`` always take priority.
+    1. If ``AZURE_ENV_FILE`` is set, load from that path (erroring if missing)
+       and allow it to override existing environment values.
+    2. Otherwise, if a ``.env`` file sits alongside this script, load from it
+       and override existing values. This allows operators to drop a sibling
+       ``.env`` (for example on Windows deployments) and have it take effect
+       even if stale variables are already present in the environment.
+    3. Explicitly exported environment variables still take priority if they
+       are set *after* this loader runs.
 
     This keeps secrets out of the repository while still allowing operators to
     provide them locally—especially in environments where a sibling ``.env`` is
@@ -65,6 +70,7 @@ def _load_env_from_file() -> None:
         return
 
     env_path = os.getenv("AZURE_ENV_FILE")
+    override_existing = True
     if env_path:
         if not os.path.exists(env_path):
             raise RuntimeError(f"AZURE_ENV_FILE is set but {env_path} does not exist")
@@ -82,7 +88,10 @@ def _load_env_from_file() -> None:
             if "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip())
+            key = key.strip()
+            value = value.strip()
+            if override_existing or key not in os.environ:
+                os.environ[key] = value
 
     _env_loaded = True
 
