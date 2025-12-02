@@ -19,6 +19,15 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 USER_EMAIL = os.getenv("OUTLOOK_USER_EMAIL", "accounts@bbkm.com.au")
 COMPLETE_FOLDER_NAME = "Completed Invoices"
 
+# Optional hardcoded Azure AD credentials. Populate these fields to force the
+# script to use the specified values instead of environment variables or the
+# sibling .env file. Leave them blank to keep the existing behavior.
+HARD_CODED_AZURE_CREDENTIALS = {
+    "AZURE_TENANT_ID": "",
+    "AZURE_CLIENT_ID": "",
+    "AZURE_CLIENT_SECRET": "",
+}
+
 DEFAULT_FORWARD_CATEGORIES = [
     "Service Agreement",
     "Reminder",
@@ -46,17 +55,26 @@ class AuthConfigurationError(RuntimeError):
 _env_loaded = False
 
 
+def _apply_hardcoded_credentials() -> None:
+    """Force Azure credentials from in-repo constants when provided."""
+
+    for key, value in HARD_CODED_AZURE_CREDENTIALS.items():
+        if value:
+            os.environ[key] = value
+
+
 def _load_env_from_file() -> None:
     """Optionally load Azure credentials from a .env-style file.
 
     Precedence is as follows:
-    1. If ``AZURE_ENV_FILE`` is set, load from that path (erroring if missing)
+    1. Hardcoded credentials in ``HARD_CODED_AZURE_CREDENTIALS`` (if set).
+    2. If ``AZURE_ENV_FILE`` is set, load from that path (erroring if missing)
        and allow it to override existing environment values.
-    2. Otherwise, if a ``.env`` file sits alongside this script, load from it
+    3. Otherwise, if a ``.env`` file sits alongside this script, load from it
        and override existing values. This allows operators to drop a sibling
        ``.env`` (for example on Windows deployments) and have it take effect
        even if stale variables are already present in the environment.
-    3. Explicitly exported environment variables still take priority if they
+    4. Explicitly exported environment variables still take priority if they
        are set *after* this loader runs.
 
     This keeps secrets out of the repository while still allowing operators to
@@ -211,6 +229,7 @@ def _make_session() -> requests.Session:
 
 def _get_access_token() -> str:
     _load_env_from_file()
+    _apply_hardcoded_credentials()
     authority = f"https://login.microsoftonline.com/{_ensure_env('AZURE_TENANT_ID')}"
     app = ConfidentialClientApplication(
         _ensure_env("AZURE_CLIENT_ID"),

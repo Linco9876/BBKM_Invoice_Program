@@ -9,6 +9,11 @@ environment variables:
 - `AZURE_CLIENT_ID`
 - `AZURE_CLIENT_SECRET`
 
+If you want to hardcode credentials directly in the scripts (for example while
+troubleshooting), set the values in `HARD_CODED_AZURE_CREDENTIALS` near the top
+of `Scripts/save_attachments_from_outlook_folder.py`. Those values override the
+environment and any `.env` files when present.
+
 If you prefer to store these values in a local file rather than your shell
 environment, set `AZURE_ENV_FILE` to point to a `.env`-style file containing
 `KEY=VALUE` lines. When provided, the file's contents override any existing
