@@ -39,6 +39,9 @@ class ForwardingError(RuntimeError):
         self.permission_denied = permission_denied
 
 
+class AuthConfigurationError(RuntimeError):
+    """Exception raised when authentication cannot succeed without operator action."""
+
 class GraphEmailProxy:
     """Lightweight wrapper to mimic the few Outlook MailItem members we rely on."""
 
@@ -162,6 +165,18 @@ def _get_access_token() -> str:
     )
     token = app.acquire_token_for_client(GRAPH_SCOPE)
     if "access_token" not in token:
+        error = (token.get("error") or "").lower()
+        description = token.get("error_description") or ""
+        codes = token.get("error_codes") or []
+
+        if error == "invalid_client" or 7000222 in codes:
+            raise AuthConfigurationError(
+                "Azure AD client secret appears to be expired or invalid. "
+                "Create a new client secret for the app registration and set "
+                "AZURE_CLIENT_SECRET before retrying. Details: "
+                f"{description or token}"
+            )
+
         raise RuntimeError(f"Failed to acquire token: {token}")
     return token["access_token"]
 

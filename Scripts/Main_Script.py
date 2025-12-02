@@ -3,6 +3,7 @@ import time
 import sys
 import threading
 from save_attachments_from_outlook_folder import (
+    AuthConfigurationError,
     forward_emails_with_categories,
     save_attachments_from_outlook_folder,
 )
@@ -117,6 +118,10 @@ def main(stop_flag, log_queue=None):
                     # Pause for 5 Seconds
                     time.sleep(5)
 
+                except AuthConfigurationError as auth_error:
+                    print(f"Fatal authentication error: {auth_error}")
+                    print("Halting processing until credentials are updated.")
+                    break
                 except Exception as e:
                     print(f"Error occurred: {e}")
                     max_retries -= 1
