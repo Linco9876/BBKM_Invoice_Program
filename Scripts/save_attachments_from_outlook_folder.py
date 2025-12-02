@@ -299,6 +299,13 @@ def _list_inbox_messages(
     messages: List[Dict[str, object]] = []
     while url:
         response = session.get(url, headers=headers, timeout=60)
+        if response.status_code in (401, 403):
+            # Access denied will not succeed with retries; surface a fatal auth
+            # configuration error so the main loop can halt and the operator can
+            # correct mailbox permissions or credentials before retrying.
+            raise AuthConfigurationError(
+                _describe_graph_error(response, "Failed to list messages")
+            )
         if response.status_code != 200:
             raise RuntimeError(_describe_graph_error(response, "Failed to list messages"))
         payload = response.json()
