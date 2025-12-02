@@ -739,34 +739,13 @@ def forward_emails_with_categories(
     post_forward_mailbox: Optional[str] = None,
     post_forward_folder: str = "Inbox",
 ) -> None:
-    """Replicate the forwarding workflow using the Microsoft Graph API."""
+    """Skip categorised emails instead of forwarding or copying them."""
 
     if not categories:
         return
 
     token = _get_access_token()
     session = _make_session()
-
-    mailbox_for_move = (post_forward_mailbox or "").strip()
-
-    complete_invoices_id: Optional[str] = None
-    last_error: Optional[Exception] = None
-    for folder_name in (COMPLETE_FOLDER_NAME, "Complete Invoices"):
-        try:
-            complete_invoices_id = _find_mail_folder_id(
-                session,
-                token,
-                display_name=folder_name,
-                user_email=USER_EMAIL,
-            )
-            break
-        except Exception as exc:  # noqa: BLE001 - log after loop
-            last_error = exc
-
-    if not complete_invoices_id and last_error:
-        print(
-            f"Warning: unable to locate '{COMPLETE_FOLDER_NAME}' folder in {USER_EMAIL}: {last_error}"
-        )
 
     category_targets = {category.casefold() for category in categories}
 
@@ -785,120 +764,10 @@ def forward_emails_with_categories(
         if not (message_categories & category_targets):
             continue
 
-        message_details = _get_message_details(session, token, basic_message.get("id", ""))
-        email = GraphEmailProxy(session, token, message_details)
-
-        attachments: List[Dict[str, object]] = []
-        if basic_message.get("hasAttachments"):
-            attachments = _list_attachments(session, token, email.id)
-
-        forwarded = False
-        copied_via_fallback = False
-        try:
-            _send_message_copy(session, token, email, to_address, attachments)
-            forwarded = True
-        except ForwardingError as exc:
-            print(
-                "Error copying '",
-                email.Subject,
-                "' to '",
-                to_address,
-                "': ",
-                f"{exc}",
-                sep="",
-            )
-            if mailbox_for_move:
-                target_folder = post_forward_folder or "Inbox"
-                try:
-                    _copy_message_to_mailbox(
-                        session,
-                        token,
-                        email,
-                        attachments,
-                        mailbox_for_move,
-                        target_folder,
-                    )
-                    print(
-                        "Copied via fallback: '",
-                        email.Subject,
-                        "' to '",
-                        mailbox_for_move,
-                        "' ",
-                        target_folder,
-                        ".",
-                        sep="",
-                    )
-                    forwarded = True
-                    copied_via_fallback = True
-                except Exception as copy_exc:  # noqa: BLE001 - log but continue
-                    print(
-                        "Error copying '",
-                        email.Subject,
-                        "' to '",
-                        mailbox_for_move,
-                        "' ",
-                        target_folder,
-                        " after forward failure: ",
-                        f"{copy_exc}",
-                        sep="",
-                    )
-
-            if not forwarded:
-                failure_category = "Forward Failed" if exc.permission_denied else "Forward Error"
-                try:
-                    email.Categories = failure_category
-                    email.UnRead = False
-                    email.Save()
-                except Exception as save_exc:  # noqa: BLE001 - log but continue
-                    print(f"Error marking '{email.Subject}' as {failure_category}: {save_exc}")
-                continue
-        except Exception as exc:  # noqa: BLE001 - preserve behaviour and logging
-            print(f"Error copying '{email.Subject}' to '{to_address}': {exc}")
-            continue
-
-        if forwarded:
-            print(f"Forwarded: '{email.Subject}' to '{to_address}'.")
-
-        email.UnRead = False
-        try:
-            email.Save()
-        except Exception as exc:  # noqa: BLE001 - continue processing other emails
-            print(f"Error updating '{email.Subject}': {exc}")
-
-        copied = copied_via_fallback
-        if mailbox_for_move and not copied_via_fallback:
-            target_folder = post_forward_folder or "Inbox"
-            try:
-                _copy_message_to_mailbox(
-                    session,
-                    token,
-                    email,
-                    attachments,
-                    mailbox_for_move,
-                    target_folder,
-                )
-                print(
-                    f"Copied: '{email.Subject}' to '{mailbox_for_move}' {target_folder}."
-                )
-                copied = True
-            except Exception as exc:  # noqa: BLE001 - continue processing other emails
-                print(
-                    f"Error copying '{email.Subject}' to '{mailbox_for_move}' {target_folder}: {exc}"
-                )
-
-        if complete_invoices_id:
-            try:
-                _move_message(
-                    session,
-                    token,
-                    email.id,
-                    complete_invoices_id,
-                    user_email=USER_EMAIL,
-                )
-                print(f"Moved: '{email.Subject}' to '{COMPLETE_FOLDER_NAME}'.")
-            except Exception as exc:  # noqa: BLE001 - continue processing other emails
-                print(f"Error moving '{email.Subject}' to '{COMPLETE_FOLDER_NAME}': {exc}")
-                continue
+        subject = basic_message.get("subject") or ""
+        print(
+            f"Skipping categorised email '{subject}' in {USER_EMAIL}; forwarding is disabled."
+        )
 
 
 
@@ -907,22 +776,25 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Download attachments from the shared inbox or forward categorised "
-            "emails using Microsoft Graph."
+            "Download attachments from the shared inbox or skip categorised "
+            "emails (forwarding disabled)."
         )
     )
     parser.add_argument(
         "--forward",
         action="store_true",
         help=(
-            "Forward emails that match the supplied categories instead of "
+            "Skip emails that match the supplied categories instead of "
             "downloading attachments."
         ),
     )
     parser.add_argument(
         "--to-address",
-        default="info@bbkm.com.au",
-        help="Destination email address for forwarded messages.",
+        default="",
+        help=(
+            "Destination email address for forwarding (currently unused; "
+            "categorised emails remain in the source mailbox)."
+        ),
     )
     parser.add_argument(
         "--category",
@@ -956,11 +828,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     parser.add_argument(
         "--post-forward-mailbox",
-        default="info@bbkm.com.au",
+        default="",
         help=(
-            "Mailbox to hold forwarded messages. The script will copy the "
-            "message (with attachments) to this inbox and keep the original "
-            "in the source mailbox."
+            "Mailbox to hold forwarded messages (unused while forwarding is "
+            "disabled)."
         ),
     )
     parser.add_argument(
