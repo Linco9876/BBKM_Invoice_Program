@@ -17,6 +17,7 @@ GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 USER_EMAIL = os.getenv("OUTLOOK_USER_EMAIL", "accounts@bbkm.com.au")
+COMPLETE_FOLDER_NAME = "Completed Invoices"
 
 DEFAULT_FORWARD_CATEGORIES = [
     "Service Agreement",
@@ -117,6 +118,13 @@ class GraphEmailProxy:
         self._dirty = False
 
 
+def _set_user_email(user_email: str) -> None:
+    """Update the target mailbox for subsequent Graph calls."""
+
+    global USER_EMAIL
+    USER_EMAIL = (user_email or "").strip() or USER_EMAIL
+
+
 def _ensure_env(var_name: str) -> str:
     value = os.getenv(var_name)
     if not value:
@@ -153,6 +161,36 @@ def _get_access_token() -> str:
     return token["access_token"]
 
 
+def _describe_graph_error(response: requests.Response, action: str) -> str:
+    """Return a helpful error string for Microsoft Graph failures."""
+
+    detail = ""
+    try:
+        payload = response.json()
+        error = payload.get("error") or {}
+        code = error.get("code")
+        message = error.get("message")
+        if code or message:
+            detail = f"{code or 'Error'}: {message or ''}".strip()
+    except Exception:
+        # fall back to raw body below
+        pass
+
+    if response.status_code in (401, 403):
+        hint = (
+            " Confirm that AZURE_TENANT_ID, AZURE_CLIENT_ID, and AZURE_CLIENT_SECRET"
+            " are set for the app registration and that it has Mail.ReadWrite and"
+            f" Mail.Send application permissions for {USER_EMAIL}. If the mailbox"
+            " differs, pass --user-email or set OUTLOOK_USER_EMAIL to the target"
+            " address (accounts@bbkm.com.au by default)."
+        )
+        detail = f"{detail or response.text[:200]}{hint}"
+    else:
+        detail = detail or response.text[:200]
+
+    return f"{action}: {response.status_code} {detail}"
+
+
 def compare_files(file1: str, file2: str) -> bool:
     if not os.path.exists(file1) or not os.path.exists(file2):
         return False
@@ -164,7 +202,7 @@ def _get_message_details(session: requests.Session, token: str, message_id: str)
     headers = {"Authorization": f"Bearer {token}"}
     response = session.get(url, headers=headers, timeout=60)
     if response.status_code != 200:
-        raise RuntimeError(f"Failed to fetch message {message_id}: {response.status_code} {response.text[:200]}")
+        raise RuntimeError(_describe_graph_error(response, f"Failed to fetch message {message_id}"))
     return response.json()
 
 
@@ -183,7 +221,7 @@ def _list_inbox_messages(
     while url:
         response = session.get(url, headers=headers, timeout=60)
         if response.status_code != 200:
-            raise RuntimeError(f"Failed to list messages: {response.status_code} {response.text[:200]}")
+            raise RuntimeError(_describe_graph_error(response, "Failed to list messages"))
         payload = response.json()
         messages.extend(payload.get("value", []))
         url = payload.get("@odata.nextLink")
@@ -197,7 +235,7 @@ def _list_attachments(session: requests.Session, token: str, message_id: str) ->
     while url:
         response = session.get(url, headers=headers, timeout=60)
         if response.status_code != 200:
-            raise RuntimeError(f"Failed to list attachments: {response.status_code} {response.text[:200]}")
+            raise RuntimeError(_describe_graph_error(response, "Failed to list attachments"))
         payload = response.json()
         attachments.extend(payload.get("value", []))
         url = payload.get("@odata.nextLink")
@@ -205,20 +243,23 @@ def _list_attachments(session: requests.Session, token: str, message_id: str) ->
 
 
 def _find_mail_folder_id(
-    session: requests.Session, token: str, *, display_name: str
+    session: requests.Session,
+    token: str,
+    *,
+    display_name: str,
+    user_email: Optional[str] = None,
 ) -> str:
     """Return the folder id that matches ``display_name`` (case-insensitive)."""
 
+    mailbox = (user_email or USER_EMAIL).strip()
     target = display_name.casefold()
-    url = f"{GRAPH_BASE}/users/{USER_EMAIL}/mailFolders?$top=200"
+    url = f"{GRAPH_BASE}/users/{mailbox}/mailFolders?$top=200"
     headers = {"Authorization": f"Bearer {token}"}
 
     while url:
         response = session.get(url, headers=headers, timeout=60)
         if response.status_code != 200:
-            raise RuntimeError(
-                f"Failed to list mail folders: {response.status_code} {response.text[:200]}"
-            )
+            raise RuntimeError(_describe_graph_error(response, "Failed to list mail folders"))
 
         payload = response.json()
         for folder in payload.get("value", []):
@@ -229,14 +270,19 @@ def _find_mail_folder_id(
                     return folder_id
 
         url = payload.get("@odata.nextLink")
-
-    raise RuntimeError(f"Unable to locate folder named '{display_name}' for {USER_EMAIL}")
+    raise RuntimeError(f"Unable to locate folder named '{display_name}' for {mailbox}")
 
 
 def _move_message(
-    session: requests.Session, token: str, message_id: str, destination_id: str
+    session: requests.Session,
+    token: str,
+    message_id: str,
+    destination_id: str,
+    *,
+    user_email: Optional[str] = None,
 ) -> None:
-    url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{message_id}/move"
+    mailbox = (user_email or USER_EMAIL).strip()
+    url = f"{GRAPH_BASE}/users/{mailbox}/messages/{message_id}/move"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -251,8 +297,22 @@ def _move_message(
         return
 
     raise RuntimeError(
-        f"Failed to move message {message_id}: {response.status_code} {response.text[:200]}"
+        _describe_graph_error(response, f"Failed to move message {message_id}")
     )
+
+
+def _delete_message(
+    session: requests.Session, token: str, message_id: str, *, user_email: Optional[str] = None
+) -> None:
+    mailbox = (user_email or USER_EMAIL).strip()
+    url = f"{GRAPH_BASE}/users/{mailbox}/messages/{message_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    response = session.delete(url, headers=headers, timeout=60)
+    if response.status_code in (200, 204):
+        return
+    if response.status_code == 404:
+        return
+    raise RuntimeError(_describe_graph_error(response, f"Failed to delete message {message_id}"))
 
 
 def _ensure_attachment_content(
@@ -276,9 +336,70 @@ def _ensure_attachment_content(
     response = session.get(att_url, headers=headers, timeout=60)
     if response.status_code != 200:
         raise RuntimeError(
-            f"Failed to download attachment {attachment_id}: {response.status_code} {response.text[:200]}"
+            _describe_graph_error(
+                response, f"Failed to download attachment {attachment_id}"
+            )
         )
     return base64.b64encode(response.content).decode("ascii")
+
+
+def _copy_message_to_mailbox(
+    session: requests.Session,
+    token: str,
+    email: GraphEmailProxy,
+    attachments: List[Dict[str, object]],
+    target_mailbox: str,
+    target_folder: str = "Inbox",
+) -> None:
+    mailbox = (target_mailbox or "").strip()
+    if not mailbox:
+        return
+
+    folder_id = _find_mail_folder_id(
+        session, token, display_name=target_folder, user_email=mailbox
+    )
+
+    message_attachments: List[Dict[str, object]] = []
+    for attachment in attachments:
+        odata_type = (attachment.get("@odata.type") or "").lower()
+        if "fileattachment" not in odata_type:
+            continue
+        name = attachment.get("name") or "attachment"
+        content_type = attachment.get("contentType") or "application/octet-stream"
+        content_bytes = _ensure_attachment_content(session, token, email.id, attachment)
+        message_attachments.append(
+            {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": name,
+                "contentType": content_type,
+                "contentBytes": content_bytes,
+            }
+        )
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    body: Dict[str, object] = {
+        "subject": email.Subject,
+        "body": {"contentType": "HTML", "content": email.Body},
+        "toRecipients": [{"emailAddress": {"address": mailbox}}],
+        "isRead": False,
+    }
+    if message_attachments:
+        body["attachments"] = message_attachments
+
+    url = f"{GRAPH_BASE}/users/{mailbox}/mailFolders/{folder_id}/messages"
+    response = session.post(url, headers=headers, data=json.dumps(body), timeout=60)
+    if response.status_code in (200, 201):
+        return
+
+    raise RuntimeError(
+        _describe_graph_error(
+            response,
+            f"Failed to copy message '{email.Subject}' to {mailbox} {target_folder}",
+        )
+    )
 
 
 def _send_message_copy(
@@ -351,7 +472,7 @@ def _send_message_copy(
         )
 
     raise ForwardingError(
-        f"Failed to send message copy: {response.status_code} {response.text[:200]}",
+        _describe_graph_error(response, "Failed to send message copy"),
         status_code=response.status_code,
     )
 
@@ -573,7 +694,11 @@ def save_attachments_from_outlook_folder(
 
 
 def forward_emails_with_categories(
-    to_address: str, categories: List[str]
+    to_address: str,
+    categories: List[str],
+    *,
+    post_forward_mailbox: Optional[str] = None,
+    post_forward_folder: str = "Inbox",
 ) -> None:
     """Replicate the forwarding workflow using the Microsoft Graph API."""
 
@@ -583,9 +708,26 @@ def forward_emails_with_categories(
     token = _get_access_token()
     session = _make_session()
 
-    complete_invoices_id = _find_mail_folder_id(
-        session, token, display_name="Complete Invoices"
-    )
+    mailbox_for_move = (post_forward_mailbox or "").strip()
+
+    complete_invoices_id: Optional[str] = None
+    last_error: Optional[Exception] = None
+    for folder_name in (COMPLETE_FOLDER_NAME, "Complete Invoices"):
+        try:
+            complete_invoices_id = _find_mail_folder_id(
+                session,
+                token,
+                display_name=folder_name,
+                user_email=USER_EMAIL,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001 - log after loop
+            last_error = exc
+
+    if not complete_invoices_id and last_error:
+        print(
+            f"Warning: unable to locate '{COMPLETE_FOLDER_NAME}' folder in {USER_EMAIL}: {last_error}"
+        )
 
     category_targets = {category.casefold() for category in categories}
 
@@ -611,8 +753,10 @@ def forward_emails_with_categories(
         if basic_message.get("hasAttachments"):
             attachments = _list_attachments(session, token, email.id)
 
+        forwarded = False
         try:
             _send_message_copy(session, token, email, to_address, attachments)
+            forwarded = True
         except ForwardingError as exc:
             print(
                 "Error copying '",
@@ -635,20 +779,50 @@ def forward_emails_with_categories(
             print(f"Error copying '{email.Subject}' to '{to_address}': {exc}")
             continue
 
+        if forwarded:
+            print(f"Forwarded: '{email.Subject}' to '{to_address}'.")
+
         email.UnRead = False
         try:
             email.Save()
         except Exception as exc:  # noqa: BLE001 - continue processing other emails
             print(f"Error updating '{email.Subject}': {exc}")
 
-        try:
-            _move_message(session, token, email.id, complete_invoices_id)
-            print(f"Moved: '{email.Subject}' to 'Complete Invoices'.")
-        except Exception as exc:  # noqa: BLE001 - continue processing other emails
-            print(f"Error moving '{email.Subject}' to 'Complete Invoices': {exc}")
-            continue
+        copied = False
+        if mailbox_for_move:
+            target_folder = post_forward_folder or "Inbox"
+            try:
+                _copy_message_to_mailbox(
+                    session,
+                    token,
+                    email,
+                    attachments,
+                    mailbox_for_move,
+                    target_folder,
+                )
+                print(
+                    f"Copied: '{email.Subject}' to '{mailbox_for_move}' {target_folder}."
+                )
+                copied = True
+            except Exception as exc:  # noqa: BLE001 - continue processing other emails
+                print(
+                    f"Error copying '{email.Subject}' to '{mailbox_for_move}' {target_folder}: {exc}"
+                )
 
-        print(f"Copied: '{email.Subject}' to '{to_address}'.")
+        if complete_invoices_id:
+            try:
+                _move_message(
+                    session,
+                    token,
+                    email.id,
+                    complete_invoices_id,
+                    user_email=USER_EMAIL,
+                )
+                print(f"Moved: '{email.Subject}' to '{COMPLETE_FOLDER_NAME}'.")
+            except Exception as exc:  # noqa: BLE001 - continue processing other emails
+                print(f"Error moving '{email.Subject}' to '{COMPLETE_FOLDER_NAME}': {exc}")
+                continue
+
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -695,12 +869,44 @@ def main(argv: Optional[List[str]] = None) -> None:
         metavar="PATH",
         help="Filesystem path for saving attachments.",
     )
+    parser.add_argument(
+        "--user-email",
+        default=os.getenv("OUTLOOK_USER_EMAIL", USER_EMAIL),
+        help=(
+            "Mailbox to process with Microsoft Graph. Overrides OUTLOOK_USER_EMAIL "
+            "and defaults to accounts@bbkm.com.au."
+        ),
+    )
+    parser.add_argument(
+        "--post-forward-mailbox",
+        default="info@bbkm.com.au",
+        help=(
+            "Mailbox to hold forwarded messages. The script will copy the "
+            "message (with attachments) to this inbox and keep the original "
+            "in the source mailbox."
+        ),
+    )
+    parser.add_argument(
+        "--post-forward-folder",
+        default="Inbox",
+        help=(
+            "Folder name in the post-forward mailbox to store the moved message. "
+            "Defaults to Inbox."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
+    _set_user_email(args.user_email)
+
     if args.forward:
         categories = args.categories or DEFAULT_FORWARD_CATEGORIES
-        forward_emails_with_categories(args.to_address, categories)
+        forward_emails_with_categories(
+            args.to_address,
+            categories,
+            post_forward_mailbox=args.post_forward_mailbox,
+            post_forward_folder=args.post_forward_folder,
+        )
         return
 
     save_attachments_from_outlook_folder(args.folder, args.destination)
