@@ -111,6 +111,11 @@ class GraphEmailProxy:
         if self._flag_state:
             body["flag"] = {"flagStatus": self._flag_state}
         response = self._session.patch(url, headers=headers, data=json.dumps(body), timeout=60)
+        if response.status_code in (200, 202, 404):
+            # 404 is treated as a benign condition: the message may have been moved
+            # or deleted between retrieval and update attempts.
+            self._dirty = False
+            return
         if response.status_code not in (200, 202):
             raise RuntimeError(
                 f"Failed to update message {self._message_id}: {response.status_code} {response.text[:200]}"
@@ -161,7 +166,9 @@ def _get_access_token() -> str:
     return token["access_token"]
 
 
-def _describe_graph_error(response: requests.Response, action: str) -> str:
+def _describe_graph_error(
+    response: requests.Response, action: str, *, mailbox_hint: Optional[str] = None
+) -> str:
     """Return a helpful error string for Microsoft Graph failures."""
 
     detail = ""
@@ -177,12 +184,15 @@ def _describe_graph_error(response: requests.Response, action: str) -> str:
         pass
 
     if response.status_code in (401, 403):
+        mailbox = (mailbox_hint or USER_EMAIL).strip() or USER_EMAIL
         hint = (
             " Confirm that AZURE_TENANT_ID, AZURE_CLIENT_ID, and AZURE_CLIENT_SECRET"
             " are set for the app registration and that it has Mail.ReadWrite and"
-            f" Mail.Send application permissions for {USER_EMAIL}. If the mailbox"
+            f" Mail.Send application permissions for {mailbox}. If the mailbox"
             " differs, pass --user-email or set OUTLOOK_USER_EMAIL to the target"
-            " address (accounts@bbkm.com.au by default)."
+            " address (accounts@bbkm.com.au by default). For cross-mailbox copies,"
+            " ensure the app registration has rights to the destination mailbox"
+            " (e.g., info@bbkm.com.au)."
         )
         detail = f"{detail or response.text[:200]}{hint}"
     else:
@@ -259,7 +269,13 @@ def _find_mail_folder_id(
     while url:
         response = session.get(url, headers=headers, timeout=60)
         if response.status_code != 200:
-            raise RuntimeError(_describe_graph_error(response, "Failed to list mail folders"))
+            raise RuntimeError(
+                _describe_graph_error(
+                    response,
+                    "Failed to list mail folders",
+                    mailbox_hint=mailbox,
+                )
+            )
 
         payload = response.json()
         for folder in payload.get("value", []):
@@ -297,7 +313,11 @@ def _move_message(
         return
 
     raise RuntimeError(
-        _describe_graph_error(response, f"Failed to move message {message_id}")
+        _describe_graph_error(
+            response,
+            f"Failed to move message {message_id}",
+            mailbox_hint=mailbox,
+        )
     )
 
 
@@ -312,7 +332,13 @@ def _delete_message(
         return
     if response.status_code == 404:
         return
-    raise RuntimeError(_describe_graph_error(response, f"Failed to delete message {message_id}"))
+    raise RuntimeError(
+        _describe_graph_error(
+            response,
+            f"Failed to delete message {message_id}",
+            mailbox_hint=mailbox,
+        )
+    )
 
 
 def _ensure_attachment_content(
@@ -398,6 +424,7 @@ def _copy_message_to_mailbox(
         _describe_graph_error(
             response,
             f"Failed to copy message '{email.Subject}' to {mailbox} {target_folder}",
+            mailbox_hint=mailbox,
         )
     )
 
@@ -464,15 +491,27 @@ def _send_message_copy(
             return
 
         raise ForwardingError(
-            "Failed to send message copy: "
-            f"403 {response.text[:200]} and forward fallback "
-            f"{forward_response.status_code} {forward_response.text[:200]}",
+            _describe_graph_error(
+                response,
+                "Failed to send message copy",
+                mailbox_hint=USER_EMAIL,
+            )
+            + " and forward fallback "
+            + _describe_graph_error(
+                forward_response,
+                "Failed to forward message directly",
+                mailbox_hint=USER_EMAIL,
+            ),
             status_code=403,
             permission_denied=True,
         )
 
     raise ForwardingError(
-        _describe_graph_error(response, "Failed to send message copy"),
+        _describe_graph_error(
+            response,
+            "Failed to send message copy",
+            mailbox_hint=USER_EMAIL,
+        ),
         status_code=response.status_code,
     )
 
