@@ -49,10 +49,14 @@ _env_loaded = False
 def _load_env_from_file() -> None:
     """Optionally load Azure credentials from a .env-style file.
 
-    If ``AZURE_ENV_FILE`` points to a file containing ``KEY=VALUE`` lines, the
-    values are loaded into ``os.environ`` (without overriding any variables that
-    are already set). This allows operators to provide secrets locally without
-    hard-coding them in the repository or shell profile.
+    Precedence is as follows:
+    1. If ``AZURE_ENV_FILE`` is set, load from that path (erroring if missing).
+    2. Otherwise, if a ``.env`` file sits alongside this script, load from it.
+    3. Values already present in ``os.environ`` always take priority.
+
+    This keeps secrets out of the repository while still allowing operators to
+    provide them locally—especially in environments where a sibling ``.env`` is
+    distributed with the scripts.
     """
 
     global _env_loaded
@@ -61,11 +65,14 @@ def _load_env_from_file() -> None:
         return
 
     env_path = os.getenv("AZURE_ENV_FILE")
-    if not env_path:
-        return
-
-    if not os.path.exists(env_path):
-        raise RuntimeError(f"AZURE_ENV_FILE is set but {env_path} does not exist")
+    if env_path:
+        if not os.path.exists(env_path):
+            raise RuntimeError(f"AZURE_ENV_FILE is set but {env_path} does not exist")
+    else:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        env_path = os.path.join(script_dir, ".env")
+        if not os.path.exists(env_path):
+            return
 
     with open(env_path, "r", encoding="utf-8") as env_file:
         for raw_line in env_file:
