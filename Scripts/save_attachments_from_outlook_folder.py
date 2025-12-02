@@ -493,13 +493,13 @@ def _send_message_copy(
         raise ForwardingError(
             _describe_graph_error(
                 response,
-                "Failed to send message copy",
+                f"Failed to send message copy to {to_address}",
                 mailbox_hint=USER_EMAIL,
             )
             + " and forward fallback "
             + _describe_graph_error(
                 forward_response,
-                "Failed to forward message directly",
+                f"Failed to forward message directly to {to_address}",
                 mailbox_hint=USER_EMAIL,
             ),
             status_code=403,
@@ -509,7 +509,7 @@ def _send_message_copy(
     raise ForwardingError(
         _describe_graph_error(
             response,
-            "Failed to send message copy",
+            f"Failed to send message copy to {to_address}",
             mailbox_hint=USER_EMAIL,
         ),
         status_code=response.status_code,
@@ -793,6 +793,7 @@ def forward_emails_with_categories(
             attachments = _list_attachments(session, token, email.id)
 
         forwarded = False
+        copied_via_fallback = False
         try:
             _send_message_copy(session, token, email, to_address, attachments)
             forwarded = True
@@ -806,14 +807,51 @@ def forward_emails_with_categories(
                 f"{exc}",
                 sep="",
             )
-            failure_category = "Forward Failed" if exc.permission_denied else "Forward Error"
-            try:
-                email.Categories = failure_category
-                email.UnRead = False
-                email.Save()
-            except Exception as save_exc:  # noqa: BLE001 - log but continue
-                print(f"Error marking '{email.Subject}' as {failure_category}: {save_exc}")
-            continue
+            if mailbox_for_move:
+                target_folder = post_forward_folder or "Inbox"
+                try:
+                    _copy_message_to_mailbox(
+                        session,
+                        token,
+                        email,
+                        attachments,
+                        mailbox_for_move,
+                        target_folder,
+                    )
+                    print(
+                        "Copied via fallback: '",
+                        email.Subject,
+                        "' to '",
+                        mailbox_for_move,
+                        "' ",
+                        target_folder,
+                        ".",
+                        sep="",
+                    )
+                    forwarded = True
+                    copied_via_fallback = True
+                except Exception as copy_exc:  # noqa: BLE001 - log but continue
+                    print(
+                        "Error copying '",
+                        email.Subject,
+                        "' to '",
+                        mailbox_for_move,
+                        "' ",
+                        target_folder,
+                        " after forward failure: ",
+                        f"{copy_exc}",
+                        sep="",
+                    )
+
+            if not forwarded:
+                failure_category = "Forward Failed" if exc.permission_denied else "Forward Error"
+                try:
+                    email.Categories = failure_category
+                    email.UnRead = False
+                    email.Save()
+                except Exception as save_exc:  # noqa: BLE001 - log but continue
+                    print(f"Error marking '{email.Subject}' as {failure_category}: {save_exc}")
+                continue
         except Exception as exc:  # noqa: BLE001 - preserve behaviour and logging
             print(f"Error copying '{email.Subject}' to '{to_address}': {exc}")
             continue
@@ -827,8 +865,8 @@ def forward_emails_with_categories(
         except Exception as exc:  # noqa: BLE001 - continue processing other emails
             print(f"Error updating '{email.Subject}': {exc}")
 
-        copied = False
-        if mailbox_for_move:
+        copied = copied_via_fallback
+        if mailbox_for_move and not copied_via_fallback:
             target_folder = post_forward_folder or "Inbox"
             try:
                 _copy_message_to_mailbox(
