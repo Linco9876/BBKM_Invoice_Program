@@ -279,6 +279,36 @@ def handle_failed_file(filename, file_path, failed_path, email_file_map, text):
         except Exception as e:
             print(f"Error handling failed file: {e}")
 
+
+def move_orphaned_failed_files(failed_path, archive_path):
+    """Move any files left in the failed folder to the archive destination."""
+
+    if not os.path.isdir(failed_path):
+        return
+
+    os.makedirs(archive_path, exist_ok=True)
+
+    for filename in os.listdir(failed_path):
+        source_path = os.path.join(failed_path, filename)
+
+        if not os.path.isfile(source_path):
+            continue
+
+        destination_path = os.path.join(archive_path, filename)
+        counter = 1
+        base_name, extension = os.path.splitext(filename)
+
+        while os.path.exists(destination_path):
+            destination_path = os.path.join(
+                archive_path, f"{base_name}_failed_archive{counter}{extension}"
+            )
+            counter += 1
+
+        shutil.move(source_path, destination_path)
+        print(
+            f"Moved orphaned failed file {filename} to 'Failed to Code' archive folder"
+        )
+
 def extract_text_ocr(file_path):
     try:
         Image.MAX_IMAGE_PIXELS = None 
@@ -373,6 +403,7 @@ def pytesseract_main(updated_saved_attachments, email_file_map):
     csv_file = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\Client Names.csv"
     renamed_invoices_path = os.path.join(invoice_path, "Renamed Invoices")
     failed_path = os.path.join(invoice_path, "Failed")
+    failed_archive_path = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\NDIS\ZInvoices for lodgement\Invoice Program\Failed to Code"
 
     os.makedirs(renamed_invoices_path, exist_ok=True)
     os.makedirs(failed_path, exist_ok=True)
@@ -393,6 +424,7 @@ def pytesseract_main(updated_saved_attachments, email_file_map):
 
     pdf_files = [f for f in os.listdir(invoice_path) if f.lower().endswith('.pdf')]
     process_pdfs(pdf_files, invoice_path, csv_data, renamed_invoices_path, failed_path, email_file_map)
+    move_orphaned_failed_files(failed_path, failed_archive_path)
 
 
 def main():
