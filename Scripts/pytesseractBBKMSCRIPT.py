@@ -182,7 +182,7 @@ def handle_successful_match(filename, file_path, code, renamed_invoices_path, fa
     new_file_path = os.path.join(target_folder, new_filename)
 
     if os.path.exists(new_file_path):
-        handle_doubled_up(filename, file_path, failed_path, email_file_map)
+        handle_doubled_up(filename, file_path, failed_path, email_file_map, new_file_path)
     else:
         move_file_and_update_email(filename, file_path, new_file_path, "Complete invoices", email_file_map)
 
@@ -197,7 +197,7 @@ def handle_existing_code_match(filename, file_path, code, renamed_invoices_path,
     destination_path = os.path.join(target_folder, filename)
 
     if os.path.exists(destination_path):
-        handle_doubled_up(filename, file_path, failed_path, email_file_map)
+        handle_doubled_up(filename, file_path, failed_path, email_file_map, destination_path)
         return
 
     move_file_and_update_email(
@@ -232,8 +232,9 @@ def filename_has_code_prefix(filename: str, code: str) -> bool:
     normalized_base = re.sub(r"[^a-z0-9]", "", base_name)
     return bool(normalized_code) and normalized_base.startswith(normalized_code)
 
-def handle_doubled_up(filename, file_path, failed_path, email_file_map):
-    print(f"You've done {filename} already silly")
+def handle_doubled_up(filename, file_path, failed_path, email_file_map, existing_file_path=None):
+    existing_display_name = os.path.basename(existing_file_path) if existing_file_path else "an existing invoice"
+    print(f"You've done {filename} already silly; duplicate of {existing_display_name}")
     email = email_file_map.get(filename)
 
     if email:
