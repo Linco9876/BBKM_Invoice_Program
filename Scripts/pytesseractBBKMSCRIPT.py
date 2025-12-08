@@ -182,7 +182,14 @@ def handle_successful_match(filename, file_path, code, renamed_invoices_path, fa
     new_file_path = os.path.join(target_folder, new_filename)
 
     if os.path.exists(new_file_path):
-        handle_doubled_up(filename, file_path, failed_path, email_file_map)
+        handle_doubled_up(
+            filename,
+            file_path,
+            failed_path,
+            email_file_map,
+            new_file_path,
+            reason="A file with the target code-prefixed name already exists",
+        )
     else:
         move_file_and_update_email(filename, file_path, new_file_path, "Complete invoices", email_file_map)
 
@@ -197,7 +204,14 @@ def handle_existing_code_match(filename, file_path, code, renamed_invoices_path,
     destination_path = os.path.join(target_folder, filename)
 
     if os.path.exists(destination_path):
-        handle_doubled_up(filename, file_path, failed_path, email_file_map)
+        handle_doubled_up(
+            filename,
+            file_path,
+            failed_path,
+            email_file_map,
+            destination_path,
+            reason="Detected an existing coded filename in the destination folder",
+        )
         return
 
     move_file_and_update_email(
@@ -209,8 +223,43 @@ def handle_existing_code_match(filename, file_path, code, renamed_invoices_path,
     )
     print(f"Existing code detected - moved {filename}")
 
-def handle_doubled_up(filename, file_path, failed_path, email_file_map):
-    print(f"You've done {filename} already silly")
+
+def filename_has_code_prefix(filename: str, code: str) -> bool:
+    """Return True if the filename already starts with the given code."""
+
+    if not code:
+        return False
+
+    base_name = os.path.splitext(filename)[0].lower()
+    code_lower = str(code).strip().lower()
+
+    # Direct prefix checks (e.g. "abc123" or "abc123_")
+    if base_name.startswith(code_lower):
+        return True
+
+    for separator in ("_", "-", " "):
+        if base_name.startswith(f"{code_lower}{separator}"):
+            return True
+
+    # Normalized check to allow codes with special characters
+    normalized_code = re.sub(r"[^a-z0-9]", "", code_lower)
+    normalized_base = re.sub(r"[^a-z0-9]", "", base_name)
+    return bool(normalized_code) and normalized_base.startswith(normalized_code)
+
+def handle_doubled_up(
+    filename,
+    file_path,
+    failed_path,
+    email_file_map,
+    existing_file_path=None,
+    reason=None,
+):
+    existing_display_name = os.path.basename(existing_file_path) if existing_file_path else "an existing invoice"
+    reason_detail = reason or "Destination already contains a file with this name"
+    print(
+        f"You've done {filename} already silly; duplicate of {existing_display_name}. "
+        f"Reason: {reason_detail}"
+    )
     email = email_file_map.get(filename)
 
     if email:
@@ -255,6 +304,36 @@ def handle_failed_file(filename, file_path, failed_path, email_file_map, text):
             move_email(email, "Complete invoices", filename)  # Move the email to the "Complete invoices" folder
         except Exception as e:
             print(f"Error handling failed file: {e}")
+
+
+def move_orphaned_failed_files(failed_path, archive_path):
+    """Move any files left in the failed folder to the archive destination."""
+
+    if not os.path.isdir(failed_path):
+        return
+
+    os.makedirs(archive_path, exist_ok=True)
+
+    for filename in os.listdir(failed_path):
+        source_path = os.path.join(failed_path, filename)
+
+        if not os.path.isfile(source_path):
+            continue
+
+        destination_path = os.path.join(archive_path, filename)
+        counter = 1
+        base_name, extension = os.path.splitext(filename)
+
+        while os.path.exists(destination_path):
+            destination_path = os.path.join(
+                archive_path, f"{base_name}_failed_archive{counter}{extension}"
+            )
+            counter += 1
+
+        shutil.move(source_path, destination_path)
+        print(
+            f"Moved orphaned failed file {filename} to 'Failed to Code' archive folder"
+        )
 
 def extract_text_ocr(file_path):
     try:
@@ -307,7 +386,17 @@ def process_pdfs(pdf_files, invoices_path, excel_data, renamed_invoices_path, fa
         found_match, code = find_name_code_match(filename, excel_data)
 
         if found_match:
-            handle_successful_match(filename, file_path, code, renamed_invoices_path, failed_path, email_file_map, 'Filename')
+            if filename_has_code_prefix(filename, code):
+                handle_existing_code_match(
+                    filename,
+                    file_path,
+                    code,
+                    renamed_invoices_path,
+                    failed_path,
+                    email_file_map,
+                )
+            else:
+                handle_successful_match(filename, file_path, code, renamed_invoices_path, failed_path, email_file_map, 'Filename')
             continue
 
         # If no match found in the file name, proceed with PyPDF2 extraction
@@ -340,6 +429,7 @@ def pytesseract_main(updated_saved_attachments, email_file_map):
     csv_file = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\Client Names.csv"
     renamed_invoices_path = os.path.join(invoice_path, "Renamed Invoices")
     failed_path = os.path.join(invoice_path, "Failed")
+    failed_archive_path = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\NDIS\ZInvoices for lodgement\Invoice Program\Failed to Code"
 
     os.makedirs(renamed_invoices_path, exist_ok=True)
     os.makedirs(failed_path, exist_ok=True)
@@ -360,6 +450,7 @@ def pytesseract_main(updated_saved_attachments, email_file_map):
 
     pdf_files = [f for f in os.listdir(invoice_path) if f.lower().endswith('.pdf')]
     process_pdfs(pdf_files, invoice_path, csv_data, renamed_invoices_path, failed_path, email_file_map)
+    move_orphaned_failed_files(failed_path, failed_archive_path)
 
 
 def main():
