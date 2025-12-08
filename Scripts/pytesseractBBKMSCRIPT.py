@@ -209,6 +209,29 @@ def handle_existing_code_match(filename, file_path, code, renamed_invoices_path,
     )
     print(f"Existing code detected - moved {filename}")
 
+
+def filename_has_code_prefix(filename: str, code: str) -> bool:
+    """Return True if the filename already starts with the given code."""
+
+    if not code:
+        return False
+
+    base_name = os.path.splitext(filename)[0].lower()
+    code_lower = str(code).strip().lower()
+
+    # Direct prefix checks (e.g. "abc123" or "abc123_")
+    if base_name.startswith(code_lower):
+        return True
+
+    for separator in ("_", "-", " "):
+        if base_name.startswith(f"{code_lower}{separator}"):
+            return True
+
+    # Normalized check to allow codes with special characters
+    normalized_code = re.sub(r"[^a-z0-9]", "", code_lower)
+    normalized_base = re.sub(r"[^a-z0-9]", "", base_name)
+    return bool(normalized_code) and normalized_base.startswith(normalized_code)
+
 def handle_doubled_up(filename, file_path, failed_path, email_file_map):
     print(f"You've done {filename} already silly")
     email = email_file_map.get(filename)
@@ -307,7 +330,17 @@ def process_pdfs(pdf_files, invoices_path, excel_data, renamed_invoices_path, fa
         found_match, code = find_name_code_match(filename, excel_data)
 
         if found_match:
-            handle_successful_match(filename, file_path, code, renamed_invoices_path, failed_path, email_file_map, 'Filename')
+            if filename_has_code_prefix(filename, code):
+                handle_existing_code_match(
+                    filename,
+                    file_path,
+                    code,
+                    renamed_invoices_path,
+                    failed_path,
+                    email_file_map,
+                )
+            else:
+                handle_successful_match(filename, file_path, code, renamed_invoices_path, failed_path, email_file_map, 'Filename')
             continue
 
         # If no match found in the file name, proceed with PyPDF2 extraction
