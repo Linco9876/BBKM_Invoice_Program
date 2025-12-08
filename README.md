@@ -29,3 +29,13 @@ loaded, the script logs which source was chosen (environment, `.env`, or
 `HARD_CODED_AZURE_CREDENTIALS`) along with the tenant and client ID being used
 so you can verify the expected app registration is active when diagnosing
 403/401 errors.
+
+## Duplicate detection
+
+`Scripts/save_attachments_from_outlook_folder.py` persists a small
+`invoice_hashes.json` manifest in the attachment destination directory. Each
+saved attachment is recorded by its SHA-256 hash so that any message with an
+identical attachment will be categorised as **Doubled up** on future runs—even
+if the category was manually removed or the original file was renamed. This
+prevents already-seen invoices from being reprocessed without relying on
+existing filenames alone.

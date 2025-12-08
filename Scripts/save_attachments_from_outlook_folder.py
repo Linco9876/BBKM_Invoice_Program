@@ -4,7 +4,7 @@ import json
 import os
 import re
 import shutil
-import filecmp
+import hashlib
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -320,12 +320,6 @@ def _describe_graph_error(
         detail = detail or response.text[:200]
 
     return f"{action}: {response.status_code} {detail}"
-
-
-def compare_files(file1: str, file2: str) -> bool:
-    if not os.path.exists(file1) or not os.path.exists(file2):
-        return False
-    return filecmp.cmp(file1, file2, shallow=False)
 
 
 def _get_message_details(session: requests.Session, token: str, message_id: str) -> Dict[str, object]:
@@ -648,37 +642,44 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", " ", text or "")
 
 
-def _save_attachment(content_bytes: str, target_path: str) -> None:
-    with open(target_path, "wb") as handle:
-        handle.write(base64.b64decode(content_bytes))
-
-
-def _download_attachment_to_path(
+def _fetch_attachment_bytes(
     session: requests.Session,
     token: str,
     email_id: str,
     attachment: Dict[str, object],
-    target_path: str,
-) -> bool:
+) -> Optional[bytes]:
+    """Return raw bytes for an attachment, downloading if needed."""
+
     content = attachment.get("contentBytes")
     if content:
-        _save_attachment(content, target_path)
-        return True
+        try:
+            return base64.b64decode(content)
+        except Exception:
+            return None
 
     attachment_id = attachment.get("id")
     if not attachment_id:
-        return False
+        return None
 
     att_url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{email_id}/attachments/{attachment_id}/$value"
     headers = {"Authorization": f"Bearer {token}"}
     response = session.get(att_url, headers=headers, timeout=60)
-    if response.status_code == 200:
-        with open(target_path, "wb") as handle:
-            handle.write(response.content)
-        return True
+    if response.status_code != 200:
+        print(f"Error downloading attachment stream: {response.status_code}")
+        return None
 
-    print(f"Error downloading attachment stream: {response.status_code}")
-    return False
+    return response.content
+
+
+def _compute_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _compute_file_hash(path: str) -> Optional[str]:
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as handle:
+        return _compute_hash(handle.read())
 
 
 def save_attachments_from_outlook_folder(
@@ -695,6 +696,16 @@ def save_attachments_from_outlook_folder(
 
     saved_attachments: List[Tuple[GraphEmailProxy, str]] = []
     email_file_map: Dict[str, GraphEmailProxy] = {}
+
+    manifest_path = os.path.join(save_path, "invoice_hashes.json")
+    seen_hashes: Dict[str, str] = {}
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                seen_hashes = json.load(handle) or {}
+        except Exception:
+            seen_hashes = {}
+    manifest_dirty = False
 
     os.makedirs(save_path, exist_ok=True)
 
@@ -814,30 +825,40 @@ def save_attachments_from_outlook_folder(
 
             has_attachments = True
 
+            data = _fetch_attachment_bytes(session, token, email.id, attachment)
+            if data is None:
+                continue
+
+            content_hash = _compute_hash(data)
+            if content_hash in seen_hashes:
+                email.Categories = "Doubled up"
+                email.Save()
+                continue
+
             business_name = next((name_hint for domain, name_hint in domain_map.items() if domain in sender_email), None)
             base_name, ext = os.path.splitext(name)
             file_name = f"{base_name} {business_name}{ext}" if business_name else name
             destination_path = os.path.join(save_path, file_name)
 
             if os.path.exists(destination_path):
-                temp_file_path = os.path.join(save_path, f"temp_{name}")
-                if not _download_attachment_to_path(session, token, email.id, attachment, temp_file_path):
-                    continue
-                if compare_files(destination_path, temp_file_path):
-                    os.remove(temp_file_path)
+                existing_hash = _compute_file_hash(destination_path)
+                if existing_hash and existing_hash == content_hash:
                     email.Categories = "Doubled up"
                     email.Save()
+                    seen_hashes[content_hash] = destination_path
+                    manifest_dirty = True
                     continue
-                new_path = os.path.join(save_path, f"new_{name}")
-                shutil.move(temp_file_path, new_path)
-                destination_path = new_path
-            else:
-                if not _download_attachment_to_path(session, token, email.id, attachment, destination_path):
-                    continue
+
+                destination_path = os.path.join(save_path, f"new_{name}")
+
+            with open(destination_path, "wb") as handle:
+                handle.write(data)
 
             attachment_saved = True
             saved_attachments.append((email, destination_path))
             email_file_map[name] = email
+            seen_hashes[content_hash] = destination_path
+            manifest_dirty = True
 
         if not has_attachments:
             email.FlagStatus = 2
@@ -848,6 +869,13 @@ def save_attachments_from_outlook_folder(
             email.Save()
 
         break
+
+    if manifest_dirty:
+        try:
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(seen_hashes, handle, indent=2)
+        except Exception:
+            pass
 
     return saved_attachments, email_file_map
 
