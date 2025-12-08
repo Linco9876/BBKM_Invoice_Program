@@ -24,4 +24,8 @@ If `AZURE_ENV_FILE` is *not* set, the scripts also look for a `.env` file in
 the same directory as the Python files themselves (for example, alongside
 `Scripts/save_attachments_from_outlook_folder.py`). A sibling `.env` likewise
 overrides existing values so deployments that rely on dropping a `.env` next to
-the scripts always use the credentials in that file.
+the scripts always use the credentials in that file. When credentials are
+loaded, the script logs which source was chosen (environment, `.env`, or
+`HARD_CODED_AZURE_CREDENTIALS`) along with the tenant and client ID being used
+so you can verify the expected app registration is active when diagnosing
+403/401 errors.

@@ -53,14 +53,19 @@ class AuthConfigurationError(RuntimeError):
 
 
 _env_loaded = False
+_credential_source = "environment variables"
+_credential_usage_logged = False
 
 
 def _apply_hardcoded_credentials() -> None:
     """Force Azure credentials from in-repo constants when provided."""
 
+    global _credential_source
+
     for key, value in HARD_CODED_AZURE_CREDENTIALS.items():
         if value:
             os.environ[key] = value
+            _credential_source = "HARD_CODED_AZURE_CREDENTIALS"
 
 
 def _load_env_from_file() -> None:
@@ -92,11 +97,13 @@ def _load_env_from_file() -> None:
     if env_path:
         if not os.path.exists(env_path):
             raise RuntimeError(f"AZURE_ENV_FILE is set but {env_path} does not exist")
+        source_label = f"AZURE_ENV_FILE ({env_path})"
     else:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         env_path = os.path.join(script_dir, ".env")
         if not os.path.exists(env_path):
             return
+        source_label = f".env next to scripts ({env_path})"
 
     with open(env_path, "r", encoding="utf-8") as env_file:
         for raw_line in env_file:
@@ -112,6 +119,24 @@ def _load_env_from_file() -> None:
                 os.environ[key] = value
 
     _env_loaded = True
+    global _credential_source
+    _credential_source = source_label
+
+
+def _log_credential_usage(tenant_id: str, client_id: str) -> None:
+    """Emit a one-time log entry showing which credentials are active."""
+
+    global _credential_usage_logged
+    if _credential_usage_logged:
+        return
+
+    source = _credential_source or "environment variables"
+    tenant_hint = tenant_id or "(unset)"
+    client_hint = client_id or "(unset)"
+    print(
+        f"Using Azure credentials from {source}: tenant {tenant_hint}, client {client_hint}"
+    )
+    _credential_usage_logged = True
 
 class GraphEmailProxy:
     """Lightweight wrapper to mimic the few Outlook MailItem members we rely on."""
@@ -230,9 +255,12 @@ def _make_session() -> requests.Session:
 def _get_access_token() -> str:
     _load_env_from_file()
     _apply_hardcoded_credentials()
-    authority = f"https://login.microsoftonline.com/{_ensure_env('AZURE_TENANT_ID')}"
+    tenant_id = _ensure_env("AZURE_TENANT_ID")
+    client_id = _ensure_env("AZURE_CLIENT_ID")
+    authority = f"https://login.microsoftonline.com/{tenant_id}"
+    _log_credential_usage(tenant_id, client_id)
     app = ConfidentialClientApplication(
-        _ensure_env("AZURE_CLIENT_ID"),
+        client_id,
         authority=authority,
         client_credential=_ensure_env("AZURE_CLIENT_SECRET"),
     )
@@ -273,6 +301,10 @@ def _describe_graph_error(
 
     if response.status_code in (401, 403):
         mailbox = (mailbox_hint or USER_EMAIL).strip() or USER_EMAIL
+        credential_hint = (
+            f" Currently using client id {os.getenv('AZURE_CLIENT_ID', '(unset)')}"
+            f" from {_credential_source} in tenant {os.getenv('AZURE_TENANT_ID', '(unset)')}"
+        )
         hint = (
             " Confirm that AZURE_TENANT_ID, AZURE_CLIENT_ID, and AZURE_CLIENT_SECRET"
             " are set for the app registration and that it has Mail.ReadWrite and"
@@ -281,6 +313,7 @@ def _describe_graph_error(
             " address (accounts@bbkm.com.au by default). For cross-mailbox copies,"
             " ensure the app registration has rights to the destination mailbox"
             " (e.g., info@bbkm.com.au)."
+            f"{credential_hint}."
         )
         detail = f"{detail or response.text[:200]}{hint}"
     else:
