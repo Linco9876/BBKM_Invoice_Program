@@ -3,6 +3,7 @@ import time
 import sys
 import threading
 from save_attachments_from_outlook_folder import (
+    AuthConfigurationError,
     forward_emails_with_categories,
     save_attachments_from_outlook_folder,
 )
@@ -72,7 +73,8 @@ def main(stop_flag, log_queue=None):
     SRC_FOLDER_FAILED = "C:\\BBKM_InvoiceSorter\\Invoices\\Failed"
     DEST_FOLDER_FAILED = "C:\\Users\\Administrator\\Better Bookkeeping Management\\BBKM - Documents\\BBKM Plan Management\\NDIS\\ZInvoices for lodgement\\Invoice Program\\Failed to Code"
 
-    max_retries = 3
+    initial_max_retries = 3
+    max_retries = initial_max_retries
     retry_delay = 5  # in seconds
 
     original_stdout = sys.stdout
@@ -117,6 +119,10 @@ def main(stop_flag, log_queue=None):
                     # Pause for 5 Seconds
                     time.sleep(5)
 
+                except AuthConfigurationError as auth_error:
+                    print(f"Fatal authentication error: {auth_error}")
+                    print("Halting processing until credentials are updated.")
+                    break
                 except Exception as e:
                     print(f"Error occurred: {e}")
                     max_retries -= 1
@@ -124,7 +130,7 @@ def main(stop_flag, log_queue=None):
                     if max_retries <= 0:
                         print("Max retries reached. Continuing...")
                         # Reset max_retries to its original value for the next loop
-                        max_retries = 5
+                        max_retries = initial_max_retries
 
                     print(f"Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
