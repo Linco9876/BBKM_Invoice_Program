@@ -12,6 +12,8 @@ from msal import ConfidentialClientApplication
 from requests.adapters import HTTPAdapter, Retry
 
 DEFAULT_SAVE_PATH = "C:\\BBKM_InvoiceSorter\\Invoices"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MANIFEST_PATH = os.path.join(SCRIPT_DIR, "invoice_hashes.json")
 
 GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -697,7 +699,7 @@ def save_attachments_from_outlook_folder(
     saved_attachments: List[Tuple[GraphEmailProxy, str]] = []
     email_file_map: Dict[str, GraphEmailProxy] = {}
 
-    manifest_path = os.path.join(save_path, "invoice_hashes.json")
+    manifest_path = MANIFEST_PATH
     seen_hashes: Dict[str, str] = {}
     if os.path.exists(manifest_path):
         try:

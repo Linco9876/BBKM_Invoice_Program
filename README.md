@@ -33,8 +33,9 @@ so you can verify the expected app registration is active when diagnosing
 ## Duplicate detection
 
 `Scripts/save_attachments_from_outlook_folder.py` persists a small
-`invoice_hashes.json` manifest in the attachment destination directory. Each
-saved attachment is recorded by its SHA-256 hash so that any message with an
+`invoice_hashes.json` manifest alongside the script itself (within the
+repository) instead of the attachment destination directory. Each saved
+attachment is recorded by its SHA-256 hash so that any message with an
 identical attachment will be categorised as **Doubled up** on future runs—even
 if the category was manually removed or the original file was renamed. This
 prevents already-seen invoices from being reprocessed without relying on
