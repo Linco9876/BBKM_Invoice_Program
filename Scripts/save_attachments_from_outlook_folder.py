@@ -145,6 +145,7 @@ class GraphEmailProxy:
         self._session = session
         self._access_token = access_token
         self._message_id = message.get("id")
+        self._change_key = message.get("changeKey")
         self.Subject = message.get("subject", "") or ""
         body = message.get("body", {}) or {}
         self.Body = body.get("content", "") or ""
@@ -203,23 +204,58 @@ class GraphEmailProxy:
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
         }
+        if self._change_key:
+            headers["If-Match"] = str(self._change_key)
         body: Dict[str, object] = {
             "categories": self._categories,
             "isRead": not self._is_unread,
         }
         if self._flag_state:
             body["flag"] = {"flagStatus": self._flag_state}
-        response = self._session.patch(url, headers=headers, data=json.dumps(body), timeout=60)
-        if response.status_code in (200, 202, 404):
-            # 404 is treated as a benign condition: the message may have been moved
-            # or deleted between retrieval and update attempts.
-            self._dirty = False
-            return
-        if response.status_code not in (200, 202):
+        attempt_headers = headers
+        for attempt in range(2):
+            response = self._session.patch(
+                url, headers=attempt_headers, data=json.dumps(body), timeout=60
+            )
+            if response.status_code in (200, 202, 404):
+                # 404 is treated as a benign condition: the message may have been moved
+                # or deleted between retrieval and update attempts.
+                self._dirty = False
+                # Update the stored change key if the server returned it so that
+                # subsequent updates do not trigger a conflict.
+                try:
+                    payload = response.json()
+                    self._change_key = payload.get("changeKey", self._change_key)
+                except Exception:
+                    pass
+                return
+
+            if response.status_code == 412 and attempt == 0:
+                # The message changed between retrieval and update. Refresh the
+                # change key and retry once to avoid abandoning the email state
+                # (which would cause duplicate processing later).
+                new_change_key = self._refresh_change_key()
+                if new_change_key:
+                    attempt_headers = dict(headers)
+                    attempt_headers["If-Match"] = new_change_key
+                    self._change_key = new_change_key
+                    continue
+
             raise RuntimeError(
                 f"Failed to update message {self._message_id}: {response.status_code} {response.text[:200]}"
             )
         self._dirty = False
+
+    def _refresh_change_key(self) -> Optional[str]:
+        """Fetch the latest change key for the message to resolve conflicts."""
+
+        url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{self._message_id}?$select=changeKey"
+        headers = {"Authorization": f"Bearer {self._access_token}"}
+        response = self._session.get(url, headers=headers, timeout=60)
+        if response.status_code == 200:
+            payload = response.json() or {}
+            return str(payload.get("changeKey")) if payload.get("changeKey") else None
+        return None
 
 
 def _set_user_email(user_email: str) -> None:
@@ -323,7 +359,10 @@ def _describe_graph_error(
 
 
 def _get_message_details(session: requests.Session, token: str, message_id: str) -> Dict[str, object]:
-    url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{message_id}?$select=id,subject,body,categories,flag,isRead,from"
+    url = (
+        f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{message_id}?"
+        "$select=id,subject,body,categories,flag,isRead,from,changeKey"
+    )
     headers = {"Authorization": f"Bearer {token}"}
     response = session.get(url, headers=headers, timeout=60)
     if response.status_code != 200:
