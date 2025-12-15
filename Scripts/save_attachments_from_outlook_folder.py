@@ -222,12 +222,17 @@ class GraphEmailProxy:
                 # or deleted between retrieval and update attempts.
                 self._dirty = False
                 # Update the stored change key if the server returned it so that
-                # subsequent updates do not trigger a conflict.
+                # subsequent updates do not trigger a conflict. Some 202 responses
+                # omit a body, so fetch the latest change key if none was provided.
                 try:
                     payload = response.json()
                     self._change_key = payload.get("changeKey", self._change_key)
                 except Exception:
-                    pass
+                    payload = None
+                if not (payload and payload.get("changeKey")):
+                    refreshed_key = self._refresh_change_key()
+                    if refreshed_key:
+                        self._change_key = refreshed_key
                 return
 
             if response.status_code == 412 and attempt == 0:
