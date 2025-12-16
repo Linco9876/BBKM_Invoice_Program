@@ -741,14 +741,35 @@ def save_attachments_from_outlook_folder(
     saved_attachments: List[Tuple[GraphEmailProxy, str]] = []
     email_file_map: Dict[str, GraphEmailProxy] = {}
 
-    manifest_path = os.path.join(save_path, "invoice_hashes.json")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    manifest_path = os.path.join(script_dir, "invoice_hashes.json")
+    legacy_manifest_path = os.path.join(save_path, "invoice_hashes.json")
     seen_hashes: Dict[str, str] = {}
+
+    manifest_source = None
     if os.path.exists(manifest_path):
+        manifest_source = manifest_path
+    elif os.path.exists(legacy_manifest_path):
+        manifest_source = legacy_manifest_path
+
+    if manifest_source:
         try:
-            with open(manifest_path, "r", encoding="utf-8") as handle:
+            with open(manifest_source, "r", encoding="utf-8") as handle:
                 seen_hashes = json.load(handle) or {}
         except Exception:
             seen_hashes = {}
+
+    # Ensure the manifest lives alongside the scripts, not in the invoice folder.
+    if os.path.exists(legacy_manifest_path):
+        try:
+            os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+            if not os.path.exists(manifest_path):
+                shutil.move(legacy_manifest_path, manifest_path)
+            else:
+                os.remove(legacy_manifest_path)
+        except Exception:
+            pass
+
     manifest_dirty = False
 
     os.makedirs(save_path, exist_ok=True)
