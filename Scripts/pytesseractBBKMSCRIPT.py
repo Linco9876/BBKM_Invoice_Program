@@ -415,12 +415,21 @@ def process_pdfs(pdf_files, invoices_path, excel_data, renamed_invoices_path, fa
             handle_failed_file(filename, file_path, failed_path, email_file_map, text)
 
 def read_csv_data(csv_file):
+    """Load the client manifest while preserving codes exactly as text."""
+
+    read_kwargs = {
+        "dtype": str,
+        "on_bad_lines": "skip",
+        "na_filter": False,  # Preserve codes like "000123" instead of converting to NaN/float
+    }
+
     with tempfile.NamedTemporaryFile(delete=False) as temp_file:
         shutil.copy2(csv_file, temp_file.name)
         try:
-            csv_data = pd.read_csv(temp_file.name, encoding='utf-8', on_bad_lines='skip')
+            csv_data = pd.read_csv(temp_file.name, encoding="utf-8", **read_kwargs)
         except UnicodeDecodeError:
-            csv_data = pd.read_csv(temp_file.name, encoding='ISO-8859-1', on_bad_lines='skip')
+            csv_data = pd.read_csv(temp_file.name, encoding="ISO-8859-1", **read_kwargs)
+
     os.unlink(temp_file.name)
     return csv_data
 
