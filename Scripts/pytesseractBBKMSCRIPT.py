@@ -142,9 +142,12 @@ def _split_known_names(raw_names):
         return []
 
     names = []
-    for part in re.split(r"[;,/|]", str(raw_names)):
+    # Names are provided as "Name A | Name B | Name C". Split on the pipe
+    # delimiter (with or without surrounding spaces) while still accepting
+    # legacy separators like commas or semicolons.
+    for part in re.split(r"\s*\|\s*|[;,/]", str(raw_names)):
         cleaned = part.strip()
-        if cleaned:
+        if cleaned and cleaned not in names:
             names.append(cleaned)
 
     if not names:
