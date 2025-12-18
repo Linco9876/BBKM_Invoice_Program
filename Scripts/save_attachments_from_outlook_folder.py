@@ -197,26 +197,32 @@ class GraphEmailProxy:
         self._dirty = True
 
     def Save(self) -> None:
+        """Persist pending changes, retrying conflicts with refreshed change keys."""
+
         if not self._dirty:
             return
+
         url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{self._message_id}"
-        headers = {
+        base_headers = {
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
         }
-        if self._change_key:
-            headers["If-Match"] = str(self._change_key)
         body: Dict[str, object] = {
             "categories": self._categories,
             "isRead": not self._is_unread,
         }
         if self._flag_state:
             body["flag"] = {"flagStatus": self._flag_state}
-        attempt_headers = headers
-        for attempt in range(2):
+
+        for attempt in range(3):
+            attempt_headers = dict(base_headers)
+            if self._change_key:
+                attempt_headers["If-Match"] = str(self._change_key)
+
             response = self._session.patch(
                 url, headers=attempt_headers, data=json.dumps(body), timeout=60
             )
+
             if response.status_code in (200, 202, 404):
                 # 404 is treated as a benign condition: the message may have been moved
                 # or deleted between retrieval and update attempts.
@@ -235,20 +241,23 @@ class GraphEmailProxy:
                         self._change_key = refreshed_key
                 return
 
-            if response.status_code == 412 and attempt == 0:
+            if response.status_code == 412 and attempt < 2:
                 # The message changed between retrieval and update. Refresh the
-                # change key and retry once to avoid abandoning the email state
-                # (which would cause duplicate processing later).
+                # change key and retry to avoid abandoning the email state (which
+                # would cause duplicate processing later).
                 new_change_key = self._refresh_change_key()
-                if new_change_key:
-                    attempt_headers = dict(headers)
-                    attempt_headers["If-Match"] = new_change_key
+                if new_change_key and new_change_key != self._change_key:
                     self._change_key = new_change_key
                     continue
+
+            if attempt < 2 and response.status_code in (429, 500, 502, 503, 504):
+                # Allow a retry on transient server or throttling errors.
+                continue
 
             raise RuntimeError(
                 f"Failed to update message {self._message_id}: {response.status_code} {response.text[:200]}"
             )
+
         self._dirty = False
 
     def _refresh_change_key(self) -> Optional[str]:
