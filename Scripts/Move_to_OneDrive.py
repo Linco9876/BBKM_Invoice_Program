@@ -20,6 +20,7 @@ DEST_FOLDER = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Docu
 RECEIPTS_FOLDER = os.path.join(DEST_FOLDER, "Renamed Receipts")
 MANUAL_LODGEMENT_FOLDER = os.path.join(DEST_FOLDER, "Manual Lodgement")
 NEW_PROVIDER_FOLDER = os.path.join(DEST_FOLDER, "New Provider")
+UNASSIGNED_PLAN_MANAGER_FOLDER = os.path.join(DEST_FOLDER, "Unassigned Plan Manager")
 SRC_FOLDER_ATTEMPT = os.path.join(DEST_FOLDER, "Attempt Code")
 DEST_FOLDER_ATTEMPT = r"C:\BBKM_InvoiceSorter\Invoices"
 SRC_FOLDER_FAILED = r"C:\BBKM_InvoiceSorter\Invoices\Failed"
@@ -40,6 +41,7 @@ CLIENT_PROFILES_PATH = r"C:\Users\Administrator\Better Bookkeeping Management\BB
 
 # Quarantine for final fallback when moves keep failing
 COULD_NOT_MOVE_FOLDER = os.path.join(DEST_FOLDER_FAILED, "Could not move")
+os.makedirs(UNASSIGNED_PLAN_MANAGER_FOLDER, exist_ok=True)
 os.makedirs(COULD_NOT_MOVE_FOLDER, exist_ok=True)
 
 # SQLite DB for 90-day duplicate detection
@@ -130,9 +132,12 @@ def _sanitize_folder_name(name: str) -> str:
 
 
 def _plan_manager_root(plan_manager: str) -> str:
-    label = plan_manager if plan_manager else "Unassigned Plan Manager"
-    safe_name = _sanitize_folder_name(label) or "Unassigned Plan Manager"
-    return os.path.join(DEST_FOLDER, safe_name)
+    label = plan_manager.strip() if plan_manager else ""
+    if not label:
+        return UNASSIGNED_PLAN_MANAGER_FOLDER
+
+    safe_name = _sanitize_folder_name(label)
+    return os.path.join(DEST_FOLDER, safe_name) if safe_name else UNASSIGNED_PLAN_MANAGER_FOLDER
 
 
 def _lookup_plan_manager(filename: str) -> str:
