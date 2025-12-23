@@ -13,10 +13,31 @@ from customtkinter import *
 from tkinter import messagebox
 from Main_Script import main
 
-CSV_FILE_PATH = (
-    "C:\\Users\\Administrator\\Better Bookkeeping Management\\BBKM - Documents\\"
-    "BBKM Plan Management\\Client_Profiles.csv"
+CLIENT_PROFILE_DIR = r"C:\\Users\\Administrator\\Better Bookkeeping Management\\BBKM - Documents\\BBKM Plan Management"
+CLIENT_PROFILE_FILENAMES = (
+    "client_profile.csv",  # New canonical client profile file
+    "Client_Profiles.csv",  # Legacy mixed-case variant
+    "client_names.csv",  # Legacy file name retained for backward compatibility
 )
+
+
+def _client_profile_candidates() -> List[str]:
+    env_path = os.getenv("CLIENT_PROFILE_PATH")
+    candidates = [env_path] if env_path else []
+    candidates.extend(
+        os.path.join(CLIENT_PROFILE_DIR, filename) for filename in CLIENT_PROFILE_FILENAMES
+    )
+    return [path for path in candidates if path]
+
+
+def _resolve_client_profile_path() -> str:
+    candidates = _client_profile_candidates()
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    # Fall back to the first candidate so new files can be created if none exist yet
+    return candidates[0] if candidates else ""
+
 EXPECTED_COLUMNS = [
     "Client Code",
     "All Known Names",
@@ -57,20 +78,22 @@ def _split_known_names(raw_names: str) -> List[str]:
 
 
 def _load_client_profiles() -> pd.DataFrame:
-    if not os.path.isfile(CSV_FILE_PATH):
+    csv_path = _resolve_client_profile_path()
+    if not csv_path or not os.path.isfile(csv_path):
         return pd.DataFrame(columns=EXPECTED_COLUMNS)
 
     read_kwargs = {"dtype": str, "on_bad_lines": "skip", "na_filter": False}
     try:
-        df = pd.read_csv(CSV_FILE_PATH, encoding="utf-8", **read_kwargs)
+        df = pd.read_csv(csv_path, encoding="utf-8", **read_kwargs)
     except UnicodeDecodeError:
-        df = pd.read_csv(CSV_FILE_PATH, encoding="ISO-8859-1", **read_kwargs)
+        df = pd.read_csv(csv_path, encoding="ISO-8859-1", **read_kwargs)
     return _normalize_client_profile_columns(df)
 
 
 def _save_client_profiles(df: pd.DataFrame) -> None:
+    csv_path = _resolve_client_profile_path()
     normalized = _normalize_client_profile_columns(df)
-    normalized.to_csv(CSV_FILE_PATH, index=False)
+    normalized.to_csv(csv_path, index=False)
 
 class App:
     def __init__(self, root, stop_flag):
