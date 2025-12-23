@@ -37,7 +37,12 @@ FAILED_AT_FOLDER = os.path.join(DEST_FOLDER_FAILED, "Failed AT&Consumables")
 # Vendor map & logs
 VENDOR_CSV_PATH = r"C:\BBKM_InvoiceSorter\Scripts\Vendors.csv"
 MISSING_FILES_LOG = r"C:\BBKM_InvoiceSorter\missing_files.log"
-CLIENT_PROFILES_PATH = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\Client_Profiles.csv"
+CLIENT_PROFILE_DIR = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management"
+CLIENT_PROFILE_FILENAMES = (
+    "client_profile.csv",  # New canonical client profile file
+    "Client_Profiles.csv",  # Legacy mixed-case variant
+    "client_names.csv",  # Legacy file name retained for backward compatibility
+)
 
 # Quarantine for final fallback when moves keep failing
 COULD_NOT_MOVE_FOLDER = os.path.join(DEST_FOLDER_FAILED, "Could not move")
@@ -80,8 +85,24 @@ def _normalize_client_profile_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[expected]
 
 
+def _client_profile_candidates():
+    env_path = os.getenv("CLIENT_PROFILE_PATH")
+    candidates = [env_path] if env_path else []
+    candidates.extend(os.path.join(CLIENT_PROFILE_DIR, filename) for filename in CLIENT_PROFILE_FILENAMES)
+    return [path for path in candidates if path]
+
+
+def _resolve_client_profile_path() -> str:
+    candidates = _client_profile_candidates()
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return candidates[0] if candidates else ""
+
+
 def _load_client_profiles():
-    if not os.path.exists(CLIENT_PROFILES_PATH):
+    csv_path = _resolve_client_profile_path()
+    if not csv_path or not os.path.exists(csv_path):
         return pd.DataFrame(columns=["Client Code", "All Known Names", "NDIS Number", "Assigned Plan Manager"])
 
     read_kwargs = {
@@ -90,7 +111,7 @@ def _load_client_profiles():
         "na_filter": False,
     }
 
-    with open(CLIENT_PROFILES_PATH, "rb") as src:
+    with open(csv_path, "rb") as src:
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
             temp_file.write(src.read())
             temp_path = temp_file.name
@@ -471,26 +492,29 @@ def move_files(src_folder, dest_folder):
                             break
 
                 # Choose destination
+                assigned_label = os.path.basename(plan_manager_base) or "Unassigned Plan Manager"
                 if found_sta or found_respite:
                     target = os.path.join(plan_manager_base, os.path.basename(STA_INVOICES_FOLDER))
-                    log = f"Moved to STA and Assistance: {file_path}"
+                    log = f"Moved to STA and Assistance under '{assigned_label}': {file_path}"
                 elif found_vendor:
                     folder_type = VENDORS[found_vendor]
                     if folder_type == 1:
                         target = os.path.join(plan_manager_base, os.path.basename(STREAMLINE_FOLDER))
-                        log = f"Moved to Streamline: {file_path}"
+                        log = f"Moved to Streamline under '{assigned_label}': {file_path}"
                     elif folder_type == 2:
                         target = os.path.join(plan_manager_base, os.path.basename(MANUAL_LODGEMENT_FOLDER))
-                        log = f"Moved to Manual Lodgement: {file_path}"
+                        log = f"Moved to Manual Lodgement under '{assigned_label}': {file_path}"
                     elif folder_type == 3:
                         target = os.path.join(plan_manager_base, os.path.basename(AT_CONSUMABLES_FOLDER))
-                        log = f"Moved to AT&Consumables: {file_path}"
+                        log = f"Moved to AT&Consumables under '{assigned_label}': {file_path}"
                     else:
                         target = os.path.join(plan_manager_base, found_vendor)
-                        log = f"Moved to custom vendor ({found_vendor}) under {plan_manager or 'Unassigned'}: {file_path}"
+                        log = (
+                            f"Moved to custom vendor ({found_vendor}) under '{assigned_label}': {file_path}"
+                        )
                 else:
                     target = os.path.join(plan_manager_base, os.path.basename(NEW_PROVIDER_FOLDER))
-                    log = f"Moved to New Provider (no match) under {plan_manager or 'Unassigned'}: {file_path}"
+                    log = f"Moved to New Provider (no match) under '{assigned_label}': {file_path}"
 
                 dest_path = os.path.join(target, filename)
                 if safe_move(file_path, dest_path, log):

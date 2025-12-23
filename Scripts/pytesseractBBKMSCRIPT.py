@@ -22,6 +22,13 @@ from save_attachments_from_outlook_folder import (
 
 pytesseract.tesseract_cmd = r"C:\BBKM_InvoiceSorter\Library\Tesseract-OCR\tesseract.exe"
 
+CLIENT_PROFILE_DIR = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management"
+CLIENT_PROFILE_FILENAMES = (
+    "client_profile.csv",  # New canonical client profile file
+    "Client_Profiles.csv",  # Legacy mixed-case variant
+    "client_names.csv",  # Legacy file name retained for backward compatibility
+)
+
 # Enable verbose logging
 VERBOSE_LOGGING = True
 
@@ -476,6 +483,9 @@ def _normalize_client_profile_columns(df: pd.DataFrame) -> pd.DataFrame:
 def read_csv_data(csv_file):
     """Load the client manifest while preserving codes exactly as text."""
 
+    if not csv_file or not os.path.isfile(csv_file):
+        return pd.DataFrame(columns=["Client Code", "All Known Names", "NDIS Number", "Assigned Plan Manager"])
+
     read_kwargs = {
         "dtype": str,
         "on_bad_lines": "skip",
@@ -492,9 +502,24 @@ def read_csv_data(csv_file):
     os.unlink(temp_file.name)
     return _normalize_client_profile_columns(csv_data)
 
+
+def _client_profile_candidates():
+    env_path = os.getenv("CLIENT_PROFILE_PATH")
+    candidates = [env_path] if env_path else []
+    candidates.extend(os.path.join(CLIENT_PROFILE_DIR, filename) for filename in CLIENT_PROFILE_FILENAMES)
+    return [path for path in candidates if path]
+
+
+def _resolve_client_profile_path() -> str:
+    candidates = _client_profile_candidates()
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return candidates[0] if candidates else ""
+
 def pytesseract_main(updated_saved_attachments, email_file_map):
     invoice_path = r"C:\BBKM_InvoiceSorter\Invoices"
-    csv_file = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\Client_Profiles.csv"
+    csv_file = _resolve_client_profile_path()
     renamed_invoices_path = os.path.join(invoice_path, "Renamed Invoices")
     failed_path = os.path.join(invoice_path, "Failed")
     failed_archive_path = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\NDIS\ZInvoices for lodgement\Invoice Program\Failed to Code"
@@ -523,7 +548,7 @@ def pytesseract_main(updated_saved_attachments, email_file_map):
 
 def main():
     # Load the excel data
-    excel_data = read_csv_data(r'C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\Client_Profiles.csv')
+    excel_data = read_csv_data(_resolve_client_profile_path())
 
     # Define folder paths
     invoices_path = 'C:/BBKM_InvoiceSorter/Invoices'
