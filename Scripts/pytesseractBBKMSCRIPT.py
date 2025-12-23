@@ -137,22 +137,54 @@ def move_email(email, subfolder_name, filename):
 def get_subfolder(code, subfolder_paths):
     return subfolder_paths
 
+def _split_known_names(raw_names):
+    if pd.isna(raw_names):
+        return []
+
+    names = []
+    # Names are provided as "Name A | Name B | Name C". Split on the pipe
+    # delimiter (with or without surrounding spaces) while still accepting
+    # legacy separators like commas or semicolons.
+    for part in re.split(r"\s*\|\s*|[;,/]", str(raw_names)):
+        cleaned = part.strip()
+        if cleaned and cleaned not in names:
+            names.append(cleaned)
+
+    if not names:
+        cleaned = str(raw_names).strip()
+        if cleaned:
+            names.append(cleaned)
+
+    return names
+
+
+def _normalize_digits(value: str) -> str:
+    return re.sub(r"\D", "", value or "")
+
+
 def find_name_code_match(text, excel_data):
+    digit_text = _normalize_digits(text)
+
     for i in range(len(excel_data)):
-        name = str(excel_data.iloc[i, 0])
-        code = excel_data.iloc[i, 1]
+        code = str(excel_data.iloc[i]["Client Code"]).strip()
+        known_names = _split_known_names(excel_data.iloc[i]["All Known Names"])
+        ndis_number = _normalize_digits(str(excel_data.iloc[i].get("NDIS Number", "")))
 
-        if find_name_match(name, text):
-            return True, code
+        for name in known_names:
+            if find_name_match(name, text):
+                return True, code, excel_data.iloc[i].get("Assigned Plan Manager")
 
-    return False, None
+        if ndis_number and ndis_number in digit_text:
+            return True, code, excel_data.iloc[i].get("Assigned Plan Manager")
+
+    return False, None, None
 
 
 def find_existing_code_prefix(filename, excel_data):
     base_name = os.path.splitext(filename)[0].lower()
 
     for i in range(len(excel_data)):
-        raw_code = excel_data.iloc[i, 1]
+        raw_code = excel_data.iloc[i]["Client Code"]
         if pd.isna(raw_code):
             continue
 
@@ -358,7 +390,7 @@ def extract_text_pypdf2(file_path):
     return text
 
 def process_pdf(filename, file_path, text, excel_data, renamed_invoices_path, failed_path, email_file_map, method):
-    found_match, code = find_name_code_match(text, excel_data)
+    found_match, code, _plan_manager = find_name_code_match(text, excel_data)
     if found_match:
         handle_successful_match(filename, file_path, code, renamed_invoices_path, failed_path, email_file_map, method)
         return True
@@ -383,7 +415,7 @@ def process_pdfs(pdf_files, invoices_path, excel_data, renamed_invoices_path, fa
             continue
 
         # Next, try to find a client name match directly in the file name
-        found_match, code = find_name_code_match(filename, excel_data)
+        found_match, code, _plan_manager = find_name_code_match(filename, excel_data)
 
         if found_match:
             if filename_has_code_prefix(filename, code):
@@ -414,19 +446,55 @@ def process_pdfs(pdf_files, invoices_path, excel_data, renamed_invoices_path, fa
         if not found_match:
             handle_failed_file(filename, file_path, failed_path, email_file_map, text)
 
+def _normalize_client_profile_columns(df: pd.DataFrame) -> pd.DataFrame:
+    expected = [
+        "Client Code",
+        "All Known Names",
+        "NDIS Number",
+        "Assigned Plan Manager",
+    ]
+
+    # Trim column headers and pad/rename positional columns when headers are missing
+    trimmed_columns = [str(col).strip() for col in df.columns]
+    df.columns = trimmed_columns
+
+    rename_map = {}
+    for idx, expected_name in enumerate(expected):
+        if expected_name not in df.columns and idx < len(df.columns):
+            rename_map[df.columns[idx]] = expected_name
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # Ensure all expected columns exist
+    for col in expected:
+        if col not in df.columns:
+            df[col] = None
+
+    return df[expected]
+
+
 def read_csv_data(csv_file):
+    """Load the client manifest while preserving codes exactly as text."""
+
+    read_kwargs = {
+        "dtype": str,
+        "on_bad_lines": "skip",
+        "na_filter": False,  # Preserve codes like "000123" instead of converting to NaN/float
+    }
+
     with tempfile.NamedTemporaryFile(delete=False) as temp_file:
         shutil.copy2(csv_file, temp_file.name)
         try:
-            csv_data = pd.read_csv(temp_file.name, encoding='utf-8', on_bad_lines='skip')
+            csv_data = pd.read_csv(temp_file.name, encoding="utf-8", **read_kwargs)
         except UnicodeDecodeError:
-            csv_data = pd.read_csv(temp_file.name, encoding='ISO-8859-1', on_bad_lines='skip')
+            csv_data = pd.read_csv(temp_file.name, encoding="ISO-8859-1", **read_kwargs)
+
     os.unlink(temp_file.name)
-    return csv_data
+    return _normalize_client_profile_columns(csv_data)
 
 def pytesseract_main(updated_saved_attachments, email_file_map):
     invoice_path = r"C:\BBKM_InvoiceSorter\Invoices"
-    csv_file = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\Client Names.csv"
+    csv_file = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\Client_Profiles.csv"
     renamed_invoices_path = os.path.join(invoice_path, "Renamed Invoices")
     failed_path = os.path.join(invoice_path, "Failed")
     failed_archive_path = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\NDIS\ZInvoices for lodgement\Invoice Program\Failed to Code"
@@ -455,7 +523,7 @@ def pytesseract_main(updated_saved_attachments, email_file_map):
 
 def main():
     # Load the excel data
-    excel_data = pd.read_csv(r'C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\Client Names.CSV', header=None)
+    excel_data = read_csv_data(r'C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\Client_Profiles.csv')
 
     # Define folder paths
     invoices_path = 'C:/BBKM_InvoiceSorter/Invoices'

@@ -145,6 +145,7 @@ class GraphEmailProxy:
         self._session = session
         self._access_token = access_token
         self._message_id = message.get("id")
+        self._change_key = message.get("changeKey")
         self.Subject = message.get("subject", "") or ""
         body = message.get("body", {}) or {}
         self.Body = body.get("content", "") or ""
@@ -196,10 +197,13 @@ class GraphEmailProxy:
         self._dirty = True
 
     def Save(self) -> None:
+        """Persist pending changes, retrying conflicts with refreshed change keys."""
+
         if not self._dirty:
             return
+
         url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{self._message_id}"
-        headers = {
+        base_headers = {
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
         }
@@ -209,17 +213,63 @@ class GraphEmailProxy:
         }
         if self._flag_state:
             body["flag"] = {"flagStatus": self._flag_state}
-        response = self._session.patch(url, headers=headers, data=json.dumps(body), timeout=60)
-        if response.status_code in (200, 202, 404):
-            # 404 is treated as a benign condition: the message may have been moved
-            # or deleted between retrieval and update attempts.
-            self._dirty = False
-            return
-        if response.status_code not in (200, 202):
+
+        for attempt in range(3):
+            attempt_headers = dict(base_headers)
+            if self._change_key:
+                attempt_headers["If-Match"] = str(self._change_key)
+
+            response = self._session.patch(
+                url, headers=attempt_headers, data=json.dumps(body), timeout=60
+            )
+
+            if response.status_code in (200, 202, 404):
+                # 404 is treated as a benign condition: the message may have been moved
+                # or deleted between retrieval and update attempts.
+                self._dirty = False
+                # Update the stored change key if the server returned it so that
+                # subsequent updates do not trigger a conflict. Some 202 responses
+                # omit a body, so fetch the latest change key if none was provided.
+                try:
+                    payload = response.json()
+                    self._change_key = payload.get("changeKey", self._change_key)
+                except Exception:
+                    payload = None
+                if not (payload and payload.get("changeKey")):
+                    refreshed_key = self._refresh_change_key()
+                    if refreshed_key:
+                        self._change_key = refreshed_key
+                return
+
+            if response.status_code == 412 and attempt < 2:
+                # The message changed between retrieval and update. Refresh the
+                # change key and retry to avoid abandoning the email state (which
+                # would cause duplicate processing later).
+                new_change_key = self._refresh_change_key()
+                if new_change_key and new_change_key != self._change_key:
+                    self._change_key = new_change_key
+                    continue
+
+            if attempt < 2 and response.status_code in (429, 500, 502, 503, 504):
+                # Allow a retry on transient server or throttling errors.
+                continue
+
             raise RuntimeError(
                 f"Failed to update message {self._message_id}: {response.status_code} {response.text[:200]}"
             )
+
         self._dirty = False
+
+    def _refresh_change_key(self) -> Optional[str]:
+        """Fetch the latest change key for the message to resolve conflicts."""
+
+        url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{self._message_id}?$select=changeKey"
+        headers = {"Authorization": f"Bearer {self._access_token}"}
+        response = self._session.get(url, headers=headers, timeout=60)
+        if response.status_code == 200:
+            payload = response.json() or {}
+            return str(payload.get("changeKey")) if payload.get("changeKey") else None
+        return None
 
 
 def _set_user_email(user_email: str) -> None:
@@ -323,7 +373,10 @@ def _describe_graph_error(
 
 
 def _get_message_details(session: requests.Session, token: str, message_id: str) -> Dict[str, object]:
-    url = f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{message_id}?$select=id,subject,body,categories,flag,isRead,from"
+    url = (
+        f"{GRAPH_BASE}/users/{USER_EMAIL}/messages/{message_id}?"
+        "$select=id,subject,body,categories,flag,isRead,from,changeKey"
+    )
     headers = {"Authorization": f"Bearer {token}"}
     response = session.get(url, headers=headers, timeout=60)
     if response.status_code != 200:
@@ -697,14 +750,35 @@ def save_attachments_from_outlook_folder(
     saved_attachments: List[Tuple[GraphEmailProxy, str]] = []
     email_file_map: Dict[str, GraphEmailProxy] = {}
 
-    manifest_path = os.path.join(save_path, "invoice_hashes.json")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    manifest_path = os.path.join(script_dir, "invoice_hashes.json")
+    legacy_manifest_path = os.path.join(save_path, "invoice_hashes.json")
     seen_hashes: Dict[str, str] = {}
+
+    manifest_source = None
     if os.path.exists(manifest_path):
+        manifest_source = manifest_path
+    elif os.path.exists(legacy_manifest_path):
+        manifest_source = legacy_manifest_path
+
+    if manifest_source:
         try:
-            with open(manifest_path, "r", encoding="utf-8") as handle:
+            with open(manifest_source, "r", encoding="utf-8") as handle:
                 seen_hashes = json.load(handle) or {}
         except Exception:
             seen_hashes = {}
+
+    # Ensure the manifest lives alongside the scripts, not in the invoice folder.
+    if os.path.exists(legacy_manifest_path):
+        try:
+            os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+            if not os.path.exists(manifest_path):
+                shutil.move(legacy_manifest_path, manifest_path)
+            else:
+                os.remove(legacy_manifest_path)
+        except Exception:
+            pass
+
     manifest_dirty = False
 
     os.makedirs(save_path, exist_ok=True)

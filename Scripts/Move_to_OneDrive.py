@@ -3,6 +3,7 @@ import shutil
 import re
 import time
 import hashlib
+import tempfile
 import pandas as pd
 from pytesseract import pytesseract
 from pdf2image import convert_from_path
@@ -19,6 +20,7 @@ DEST_FOLDER = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Docu
 RECEIPTS_FOLDER = os.path.join(DEST_FOLDER, "Renamed Receipts")
 MANUAL_LODGEMENT_FOLDER = os.path.join(DEST_FOLDER, "Manual Lodgement")
 NEW_PROVIDER_FOLDER = os.path.join(DEST_FOLDER, "New Provider")
+UNASSIGNED_PLAN_MANAGER_FOLDER = os.path.join(DEST_FOLDER, "Unassigned Plan Manager")
 SRC_FOLDER_ATTEMPT = os.path.join(DEST_FOLDER, "Attempt Code")
 DEST_FOLDER_ATTEMPT = r"C:\BBKM_InvoiceSorter\Invoices"
 SRC_FOLDER_FAILED = r"C:\BBKM_InvoiceSorter\Invoices\Failed"
@@ -35,9 +37,11 @@ FAILED_AT_FOLDER = os.path.join(DEST_FOLDER_FAILED, "Failed AT&Consumables")
 # Vendor map & logs
 VENDOR_CSV_PATH = r"C:\BBKM_InvoiceSorter\Scripts\Vendors.csv"
 MISSING_FILES_LOG = r"C:\BBKM_InvoiceSorter\missing_files.log"
+CLIENT_PROFILES_PATH = r"C:\Users\Administrator\Better Bookkeeping Management\BBKM - Documents\BBKM Plan Management\Client_Profiles.csv"
 
 # Quarantine for final fallback when moves keep failing
 COULD_NOT_MOVE_FOLDER = os.path.join(DEST_FOLDER_FAILED, "Could not move")
+os.makedirs(UNASSIGNED_PLAN_MANAGER_FOLDER, exist_ok=True)
 os.makedirs(COULD_NOT_MOVE_FOLDER, exist_ok=True)
 
 # SQLite DB for 90-day duplicate detection
@@ -49,6 +53,108 @@ def load_vendors():
     return df.set_index('Vendor')['FolderType'].to_dict()
 
 VENDORS = load_vendors()
+
+
+def _normalize_client_profile_columns(df: pd.DataFrame) -> pd.DataFrame:
+    expected = [
+        "Client Code",
+        "All Known Names",
+        "NDIS Number",
+        "Assigned Plan Manager",
+    ]
+
+    trimmed_columns = [str(col).strip() for col in df.columns]
+    df.columns = trimmed_columns
+
+    rename_map = {}
+    for idx, expected_name in enumerate(expected):
+        if expected_name not in df.columns and idx < len(df.columns):
+            rename_map[df.columns[idx]] = expected_name
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    for col in expected:
+        if col not in df.columns:
+            df[col] = None
+
+    return df[expected]
+
+
+def _load_client_profiles():
+    if not os.path.exists(CLIENT_PROFILES_PATH):
+        return pd.DataFrame(columns=["Client Code", "All Known Names", "NDIS Number", "Assigned Plan Manager"])
+
+    read_kwargs = {
+        "dtype": str,
+        "on_bad_lines": "skip",
+        "na_filter": False,
+    }
+
+    with open(CLIENT_PROFILES_PATH, "rb") as src:
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_file.write(src.read())
+            temp_path = temp_file.name
+
+    try:
+        try:
+            df = pd.read_csv(temp_path, encoding="utf-8", **read_kwargs)
+        except UnicodeDecodeError:
+            df = pd.read_csv(temp_path, encoding="ISO-8859-1", **read_kwargs)
+    finally:
+        os.unlink(temp_path)
+
+    return _normalize_client_profile_columns(df)
+
+
+def _build_client_records(df: pd.DataFrame):
+    records = []
+    for _, row in df.iterrows():
+        code = str(row.get("Client Code", "") or "").strip()
+        plan_manager = str(row.get("Assigned Plan Manager", "") or "").strip()
+        if not code:
+            continue
+        records.append(
+            {
+                "code": code,
+                "code_normalized": re.sub(r"[^a-z0-9]", "", code.lower()),
+                "plan_manager": plan_manager,
+            }
+        )
+    return records
+
+
+CLIENT_PROFILES = _load_client_profiles()
+CLIENT_RECORDS = _build_client_records(CLIENT_PROFILES)
+
+
+def _sanitize_folder_name(name: str) -> str:
+    return re.sub(r'[<>:"/\\|?*]', "_", name).strip()
+
+
+def _plan_manager_root(plan_manager: str) -> str:
+    label = plan_manager.strip() if plan_manager else ""
+    if not label:
+        return UNASSIGNED_PLAN_MANAGER_FOLDER
+
+    safe_name = _sanitize_folder_name(label)
+    return os.path.join(DEST_FOLDER, safe_name) if safe_name else UNASSIGNED_PLAN_MANAGER_FOLDER
+
+
+def _lookup_plan_manager(filename: str) -> str:
+    base_name = os.path.splitext(filename)[0].lower()
+    normalized_base = re.sub(r"[^a-z0-9]", "", base_name)
+
+    for record in CLIENT_RECORDS:
+        code_lower = record["code"].lower()
+        if base_name.startswith(code_lower):
+            return record["plan_manager"]
+        for separator in ("_", "-", " "):
+            if base_name.startswith(f"{code_lower}{separator}"):
+                return record["plan_manager"]
+        if record["code_normalized"] and normalized_base.startswith(record["code_normalized"]):
+            return record["plan_manager"]
+
+    return ""
 
 # -------------------- State Tracking --------------------
 missing_files = set()
@@ -272,6 +378,9 @@ def move_files(src_folder, dest_folder):
                 except Exception as e:
                     print(f"Failed to prefix 'double_' for {file_path}: {e}")
 
+        plan_manager = _lookup_plan_manager(filename)
+        plan_manager_base = _plan_manager_root(plan_manager)
+
         # Attempt Code short-circuit
         if src_folder == SRC_FOLDER_ATTEMPT:
             dest_path = os.path.join(dest_folder, filename)
@@ -363,25 +472,25 @@ def move_files(src_folder, dest_folder):
 
                 # Choose destination
                 if found_sta or found_respite:
-                    target = STA_INVOICES_FOLDER
+                    target = os.path.join(plan_manager_base, os.path.basename(STA_INVOICES_FOLDER))
                     log = f"Moved to STA and Assistance: {file_path}"
                 elif found_vendor:
                     folder_type = VENDORS[found_vendor]
                     if folder_type == 1:
-                        target = STREAMLINE_FOLDER
+                        target = os.path.join(plan_manager_base, os.path.basename(STREAMLINE_FOLDER))
                         log = f"Moved to Streamline: {file_path}"
                     elif folder_type == 2:
-                        target = MANUAL_LODGEMENT_FOLDER
+                        target = os.path.join(plan_manager_base, os.path.basename(MANUAL_LODGEMENT_FOLDER))
                         log = f"Moved to Manual Lodgement: {file_path}"
                     elif folder_type == 3:
-                        target = AT_CONSUMABLES_FOLDER
+                        target = os.path.join(plan_manager_base, os.path.basename(AT_CONSUMABLES_FOLDER))
                         log = f"Moved to AT&Consumables: {file_path}"
                     else:
-                        target = os.path.join(DEST_FOLDER, found_vendor)
-                        log = f"Moved to custom vendor ({found_vendor}): {file_path}"
+                        target = os.path.join(plan_manager_base, found_vendor)
+                        log = f"Moved to custom vendor ({found_vendor}) under {plan_manager or 'Unassigned'}: {file_path}"
                 else:
-                    target = NEW_PROVIDER_FOLDER
-                    log = f"Moved to New Provider (no match): {file_path}"
+                    target = os.path.join(plan_manager_base, os.path.basename(NEW_PROVIDER_FOLDER))
+                    log = f"Moved to New Provider (no match) under {plan_manager or 'Unassigned'}: {file_path}"
 
                 dest_path = os.path.join(target, filename)
                 if safe_move(file_path, dest_path, log):

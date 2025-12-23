@@ -85,8 +85,12 @@ def convert_files_to_pdf(folder_path, saved_attachments):
         file_name, file_extension = os.path.splitext(filename)
         file_extension = file_extension.lower()
 
-        # Skip internal folders
+        # Skip internal folders and the attachment manifest used by the
+        # downloader. The manifest is not a document and should never be
+        # processed as an invoice.
         if file_name in ["Failed", "Renamed Invoices"]:
+            continue
+        if filename.casefold() == "invoice_hashes.json":
             continue
 
         output_pdf = os.path.join(folder_path, file_name + '.pdf')

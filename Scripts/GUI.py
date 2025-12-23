@@ -2,9 +2,9 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import ttk
+from typing import List
 import pythoncom
 import pandas as pd
-import csv
 import os
 import pyperclip
 import sys
@@ -15,14 +15,68 @@ from Main_Script import main
 
 CSV_FILE_PATH = (
     "C:\\Users\\Administrator\\Better Bookkeeping Management\\BBKM - Documents\\"
-    "BBKM Plan Management\\Client Names.csv"
+    "BBKM Plan Management\\Client_Profiles.csv"
 )
+EXPECTED_COLUMNS = [
+    "Client Code",
+    "All Known Names",
+    "NDIS Number",
+    "Assigned Plan Manager",
+]
+
+
+def _normalize_client_profile_columns(df: pd.DataFrame) -> pd.DataFrame:
+    trimmed_columns = [str(col).strip() for col in df.columns]
+    df.columns = trimmed_columns
+
+    rename_map = {}
+    for idx, expected_name in enumerate(EXPECTED_COLUMNS):
+        if expected_name not in df.columns and idx < len(df.columns):
+            rename_map[df.columns[idx]] = expected_name
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    for col in EXPECTED_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+
+    return df[EXPECTED_COLUMNS]
+
+
+def _split_known_names(raw_names: str) -> List[str]:
+    separators = ["|", ",", ";"]
+    names = [raw_names] if raw_names else []
+    for sep in separators:
+        names = [chunk for name in names for chunk in name.split(sep)]
+    cleaned = []
+    for name in names:
+        trimmed = name.strip()
+        if trimmed and trimmed not in cleaned:
+            cleaned.append(trimmed)
+    return cleaned
+
+
+def _load_client_profiles() -> pd.DataFrame:
+    if not os.path.isfile(CSV_FILE_PATH):
+        return pd.DataFrame(columns=EXPECTED_COLUMNS)
+
+    read_kwargs = {"dtype": str, "on_bad_lines": "skip", "na_filter": False}
+    try:
+        df = pd.read_csv(CSV_FILE_PATH, encoding="utf-8", **read_kwargs)
+    except UnicodeDecodeError:
+        df = pd.read_csv(CSV_FILE_PATH, encoding="ISO-8859-1", **read_kwargs)
+    return _normalize_client_profile_columns(df)
+
+
+def _save_client_profiles(df: pd.DataFrame) -> None:
+    normalized = _normalize_client_profile_columns(df)
+    normalized.to_csv(CSV_FILE_PATH, index=False)
 
 class App:
     def __init__(self, root, stop_flag):
         self.root = root
         self.root.title("BBKM Invoice Sorter")
-        self.root.geometry("360x780")
+        self.root.geometry("520x900")
 
         self.stop_flag = stop_flag
         self._stop_requested = False
@@ -48,32 +102,73 @@ class App:
         self.last_run_var = tk.StringVar(value="Last Run: Never")
         self.last_run_label = CTkLabel(root, textvariable=self.last_run_var)
         self.last_run_label.pack(fill="x", padx=10, pady=(5, 10))
-        self.name_label = CTkLabel(root, text="Enter New Names and Codes Below")
+        self.name_label = CTkLabel(root, text="Enter New Client Details Below")
         self.name_label.pack(padx=10, pady=5)
+
+        self.name_placeholder = "Enter known names (use | to separate)"
+        self.code_placeholder = "Enter client code"
+        self.ndis_placeholder = "Enter NDIS number"
+        self.plan_manager_placeholder = "Enter assigned plan manager"
+        self.search_placeholder = "Search clients..."
+        self.alias_placeholder = "Enter alias to add"
 
         self.name_entry = tk.Entry(root)
         self.name_entry.pack(fill="x", padx=10, pady=5)
-        self.name_entry.insert(0, "Enter name...")
+        self.name_entry.insert(0, self.name_placeholder)
         self.name_entry.bind("<FocusIn>", self.clear_name_entry)
         self.name_entry.bind("<FocusOut>", self.restore_name_entry)
 
         self.code_entry = tk.Entry(root)
         self.code_entry.pack(fill="x", padx=10, pady=5)
-        self.code_entry.insert(0, "Enter code...")
+        self.code_entry.insert(0, self.code_placeholder)
         self.code_entry.bind("<FocusIn>", self.clear_code_entry)
         self.code_entry.bind("<FocusOut>", self.restore_code_entry)
+
+        self.ndis_entry = tk.Entry(root)
+        self.ndis_entry.pack(fill="x", padx=10, pady=5)
+        self.ndis_entry.insert(0, self.ndis_placeholder)
+        self.ndis_entry.bind("<FocusIn>", self.clear_ndis_entry)
+        self.ndis_entry.bind("<FocusOut>", self.restore_ndis_entry)
+
+        self.plan_manager_entry = tk.Entry(root)
+        self.plan_manager_entry.pack(fill="x", padx=10, pady=5)
+        self.plan_manager_entry.insert(0, self.plan_manager_placeholder)
+        self.plan_manager_entry.bind("<FocusIn>", self.clear_plan_manager_entry)
+        self.plan_manager_entry.bind("<FocusOut>", self.restore_plan_manager_entry)
 
         self.add_button = CTkButton(root, text="Add to CSV", command=self.add_entry_to_csv)
         self.add_button.pack(fill="x", padx=10, pady=10)
 
-        self.client_treeview = ttk.Treeview(root, columns=("Name", "Code"), show='headings', height=8)
-        self.client_treeview.heading("Name", text="Name")
-        self.client_treeview.heading("Code", text="Code")
+        self.alias_entry = tk.Entry(root)
+        self.alias_entry.pack(fill="x", padx=10, pady=(0, 5))
+        self.alias_entry.insert(0, self.alias_placeholder)
+        self.alias_entry.bind("<FocusIn>", self.clear_alias_entry)
+        self.alias_entry.bind("<FocusOut>", self.restore_alias_entry)
+
+        self.add_alias_button = CTkButton(
+            root, text="Add Alias to Selected", command=self.add_alias_to_selected
+        )
+        self.add_alias_button.pack(fill="x", padx=10, pady=(0, 10))
+
+        self.client_treeview = ttk.Treeview(
+            root,
+            columns=("Code", "Known Names", "NDIS Number", "Plan Manager"),
+            show="headings",
+            height=10,
+        )
+        self.client_treeview.heading("Code", text="Client Code")
+        self.client_treeview.heading("Known Names", text="All Known Names")
+        self.client_treeview.heading("NDIS Number", text="NDIS Number")
+        self.client_treeview.heading("Plan Manager", text="Assigned Plan Manager")
+        self.client_treeview.column("Code", width=100)
+        self.client_treeview.column("Known Names", width=200)
+        self.client_treeview.column("NDIS Number", width=120)
+        self.client_treeview.column("Plan Manager", width=160)
         self.client_treeview.pack(fill="both", padx=10, pady=5)
 
         self.search_entry = tk.Entry(root)
         self.search_entry.pack(fill="x", padx=10, pady=5)
-        self.search_entry.insert(0, "Search Names...")
+        self.search_entry.insert(0, self.search_placeholder)
         self.search_entry.bind("<FocusIn>", self.clear_search_entry)
         self.search_entry.bind("<FocusOut>", self.restore_search_entry)
 
@@ -128,129 +223,236 @@ class App:
         self.populate_client_listbox()
 
     def clear_name_entry(self, event):
-        if self.name_entry.get() == "Enter name...":
+        if self.name_entry.get() == self.name_placeholder:
             self.name_entry.delete(0, "end")
 
     def restore_name_entry(self, event):
         if self.name_entry.get() == "":
-            self.name_entry.insert(0, "Enter name...")
+            self.name_entry.insert(0, self.name_placeholder)
 
     def clear_code_entry(self, event):
-        if self.code_entry.get() == "Enter code...":
+        if self.code_entry.get() == self.code_placeholder:
             self.code_entry.delete(0, "end")
 
     def restore_code_entry(self, event):
         if self.code_entry.get() == "":
-            self.code_entry.insert(0, "Enter code...")
+            self.code_entry.insert(0, self.code_placeholder)
+
+    def clear_ndis_entry(self, event):
+        if self.ndis_entry.get() == self.ndis_placeholder:
+            self.ndis_entry.delete(0, "end")
+
+    def restore_ndis_entry(self, event):
+        if self.ndis_entry.get() == "":
+            self.ndis_entry.insert(0, self.ndis_placeholder)
+
+    def clear_plan_manager_entry(self, event):
+        if self.plan_manager_entry.get() == self.plan_manager_placeholder:
+            self.plan_manager_entry.delete(0, "end")
+
+    def restore_plan_manager_entry(self, event):
+        if self.plan_manager_entry.get() == "":
+            self.plan_manager_entry.insert(0, self.plan_manager_placeholder)
+
+    def clear_alias_entry(self, event):
+        if self.alias_entry.get() == self.alias_placeholder:
+            self.alias_entry.delete(0, "end")
+
+    def restore_alias_entry(self, event):
+        if self.alias_entry.get() == "":
+            self.alias_entry.insert(0, self.alias_placeholder)
 
     def clear_search_entry(self, event):
-        if self.search_entry.get() == "Search Names...":
+        if self.search_entry.get() == self.search_placeholder:
             self.search_entry.delete(0, "end")
 
     def restore_search_entry(self, event):
         if self.search_entry.get() == "":
             self.search_entry.delete(0, "end")
-            self.search_entry.insert(0, "Search Names...")
+            self.search_entry.insert(0, self.search_placeholder)
 
     def add_entry_to_csv(self):
-        name = self.name_entry.get()
-        code = self.code_entry.get()
+        raw_names = self.name_entry.get().strip()
+        code = self.code_entry.get().strip()
+        ndis_number = self.ndis_entry.get().strip()
+        plan_manager = self.plan_manager_entry.get().strip()
 
-        if name and code:
-            new_entry = {'A': [name], 'B': [code]}  # Use default column names 'A' and 'B'
-            new_data_frame = pd.DataFrame(new_entry)
+        if raw_names == self.name_placeholder:
+            raw_names = ""
+        if code == self.code_placeholder:
+            code = ""
+        if ndis_number == self.ndis_placeholder:
+            ndis_number = ""
+        if plan_manager == self.plan_manager_placeholder:
+            plan_manager = ""
 
-            # Read the CSV file
-            data_frame = pd.read_csv(CSV_FILE_PATH, header=None, names=['A', 'B'])
+        known_names = _split_known_names(raw_names)
 
-            # Concatenate the new entry to the existing dataframe
-            updated_data_frame = pd.concat([data_frame, new_data_frame], axis=0)
+        if not code or not known_names:
+            messagebox.showerror(
+                "Error",
+                "Please enter a client code and at least one known name.",
+            )
+            return
 
-            # Drop duplicate rows
-            updated_data_frame = updated_data_frame.drop_duplicates()
+        data_frame = _load_client_profiles()
 
-            # Save the updated DataFrame back to the CSV file
-            updated_data_frame.to_csv(CSV_FILE_PATH, header=False, index=False)
-
-            # Clear the entry boxes
-            self.name_entry.delete(0, 'end')
-            self.code_entry.delete(0, 'end')
-
-            # Repopulate the client listbox
-            self.populate_client_listbox()
+        mask = data_frame["Client Code"].str.strip() == code
+        if mask.any():
+            current_row = data_frame[mask].iloc[0]
+            existing_names = _split_known_names(current_row.get("All Known Names", ""))
+            merged_names = _split_known_names(" | ".join(existing_names + known_names))
+            combined_known_names = " | ".join(merged_names)
+            updated_row = {
+                "Client Code": code,
+                "All Known Names": combined_known_names,
+                "NDIS Number": ndis_number or str(current_row.get("NDIS Number", "")),
+                "Assigned Plan Manager": plan_manager
+                or str(current_row.get("Assigned Plan Manager", "")),
+            }
+            data_frame = data_frame[~mask]
+            data_frame = pd.concat([data_frame, pd.DataFrame([updated_row])], axis=0)
         else:
-            messagebox.showerror("Error", "Please enter both a name and a code.")
+            combined_known_names = " | ".join(known_names)
+            new_entry = {
+                "Client Code": code,
+                "All Known Names": combined_known_names,
+                "NDIS Number": ndis_number,
+                "Assigned Plan Manager": plan_manager,
+            }
+            data_frame = pd.concat([data_frame, pd.DataFrame([new_entry])], axis=0)
+
+        data_frame = data_frame.drop_duplicates(subset=["Client Code"], keep="last")
+        _save_client_profiles(data_frame)
+
+        self.name_entry.delete(0, "end")
+        self.name_entry.insert(0, self.name_placeholder)
+        self.code_entry.delete(0, "end")
+        self.code_entry.insert(0, self.code_placeholder)
+        self.ndis_entry.delete(0, "end")
+        self.ndis_entry.insert(0, self.ndis_placeholder)
+        self.plan_manager_entry.delete(0, "end")
+        self.plan_manager_entry.insert(0, self.plan_manager_placeholder)
+
+        self.populate_client_listbox()
 
     def populate_client_listbox(self):
         for i in self.client_treeview.get_children():
             self.client_treeview.delete(i)  # Clear the treeview
 
         # Read the CSV file and populate the treeview
-        if os.path.isfile(CSV_FILE_PATH):
-            data_frame = pd.read_csv(CSV_FILE_PATH, header=None, names=['A', 'B'])
-            unique_entries = data_frame.drop_duplicates().values.tolist()
-            
-            for entry in unique_entries:
-                name, code = entry
-                self.client_treeview.insert('', 'end', values=(name, code))
+        data_frame = _load_client_profiles()
+        if not data_frame.empty:
+            for _, row in data_frame.drop_duplicates(subset=["Client Code"], keep="last").iterrows():
+                values = (
+                    str(row.get("Client Code", "")),
+                    str(row.get("All Known Names", "")),
+                    str(row.get("NDIS Number", "")),
+                    str(row.get("Assigned Plan Manager", "")),
+                )
+                self.client_treeview.insert("", "end", values=values)
 
     def search_clients(self, event=None):
         search_text = self.search_entry.get().lower()
+
+        if search_text == self.search_placeholder.lower():
+            search_text = ""
 
         # Clear the treeview
         for i in self.client_treeview.get_children():
             self.client_treeview.delete(i)
 
         # Search the client names and codes
-        if os.path.isfile(CSV_FILE_PATH):
-            data_frame = pd.read_csv(CSV_FILE_PATH, header=None, names=['A', 'B'])
-            for _, row in data_frame.iterrows():
-                name = row['A']
-                code = row['B']
-                if search_text in name.lower() or search_text in code.lower():
-                    self.client_treeview.insert('', 'end', values=(name, code))
+        data_frame = _load_client_profiles()
+        for _, row in data_frame.iterrows():
+            values = [
+                str(row.get("Client Code", "")),
+                str(row.get("All Known Names", "")),
+                str(row.get("NDIS Number", "")),
+                str(row.get("Assigned Plan Manager", "")),
+            ]
+            if any(search_text in val.lower() for val in values):
+                self.client_treeview.insert("", "end", values=values)
 
     def delete_entry_from_csv(self):
         cur_item = self.client_treeview.focus()
         if cur_item:
-            selected_name, selected_code = self.client_treeview.item(cur_item)['values']
+            selected_code = self.client_treeview.item(cur_item)['values'][0]
 
-            # Read the CSV file
-            data_frame = pd.read_csv(CSV_FILE_PATH, header=None, names=['A', 'B'])
+            data_frame = _load_client_profiles()
+            mask = data_frame["Client Code"].str.strip() != str(selected_code)
+            updated = data_frame[mask]
 
-            # Get index of rows with the selected name and code
-            index_names = data_frame[(data_frame['A'] == selected_name) & (data_frame['B'] == selected_code)].index
+            _save_client_profiles(updated)
 
-            # Delete these row indexes from dataFrame
-            data_frame.drop(index_names, inplace=True)
-
-            # Save the updated DataFrame back to the CSV file
-            data_frame.to_csv(CSV_FILE_PATH, header=False, index=False)
-
-            # Clear the entry boxes
             self.name_entry.delete(0, 'end')
             self.code_entry.delete(0, 'end')
+            self.ndis_entry.delete(0, 'end')
+            self.plan_manager_entry.delete(0, 'end')
+            self.alias_entry.delete(0, 'end')
+            self.name_entry.insert(0, self.name_placeholder)
+            self.code_entry.insert(0, self.code_placeholder)
+            self.ndis_entry.insert(0, self.ndis_placeholder)
+            self.plan_manager_entry.insert(0, self.plan_manager_placeholder)
+            self.alias_entry.insert(0, self.alias_placeholder)
 
             # Repopulate the client listbox
             self.populate_client_listbox()
 
+    def add_alias_to_selected(self):
+        alias = self.alias_entry.get().strip()
+        if alias == self.alias_placeholder:
+            alias = ""
+
+        if not alias:
+            messagebox.showerror("Error", "Please enter an alias to add.")
+            return
+
+        cur_item = self.client_treeview.focus()
+        if not cur_item:
+            messagebox.showerror("Error", "Please select a client to add the alias to.")
+            return
+
+        selected_code = str(self.client_treeview.item(cur_item)["values"][0])
+
+        data_frame = _load_client_profiles()
+        mask = data_frame["Client Code"].str.strip() == selected_code
+        if not mask.any():
+            messagebox.showerror("Error", "Could not find the selected client in the CSV.")
+            return
+
+        existing_names = _split_known_names(data_frame[mask].iloc[0].get("All Known Names", ""))
+        merged_names = _split_known_names(" | ".join(existing_names + [alias]))
+        data_frame.loc[mask, "All Known Names"] = " | ".join(merged_names)
+
+        _save_client_profiles(data_frame)
+
+        self.alias_entry.delete(0, "end")
+        self.alias_entry.insert(0, self.alias_placeholder)
+
+        self.populate_client_listbox()
+
     def copy_selected_name(self):
         cur_item = self.client_treeview.focus()
         if cur_item:
-            selected_name = self.client_treeview.item(cur_item)["values"][0]
-            pyperclip.copy(selected_name)
+            selected_names = self.client_treeview.item(cur_item)["values"][1]
+            pyperclip.copy(selected_names)
 
     def copy_selected_code(self):
         cur_item = self.client_treeview.focus()
         if cur_item:
-            selected_code = self.client_treeview.item(cur_item)["values"][1]
+            selected_code = self.client_treeview.item(cur_item)["values"][0]
             pyperclip.copy(selected_code)
 
     def copy_selected_both(self):
         cur_item = self.client_treeview.focus()
         if cur_item:
-            selected_name, selected_code = self.client_treeview.item(cur_item)["values"]
-            selected_both = f"{selected_code} - {selected_name}"
+            values = self.client_treeview.item(cur_item)["values"]
+            selected_code = values[0]
+            selected_names = values[1]
+            parsed_names = _split_known_names(selected_names)
+            primary_name = parsed_names[0] if parsed_names else selected_names
+            selected_both = f"{selected_code} - {primary_name}"
             pyperclip.copy(selected_both)
 
     def check_script_finished(self):
