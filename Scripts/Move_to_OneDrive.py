@@ -492,26 +492,29 @@ def move_files(src_folder, dest_folder):
                             break
 
                 # Choose destination
+                assigned_label = os.path.basename(plan_manager_base) or "Unassigned Plan Manager"
                 if found_sta or found_respite:
                     target = os.path.join(plan_manager_base, os.path.basename(STA_INVOICES_FOLDER))
-                    log = f"Moved to STA and Assistance: {file_path}"
+                    log = f"Moved to STA and Assistance under '{assigned_label}': {file_path}"
                 elif found_vendor:
                     folder_type = VENDORS[found_vendor]
                     if folder_type == 1:
                         target = os.path.join(plan_manager_base, os.path.basename(STREAMLINE_FOLDER))
-                        log = f"Moved to Streamline: {file_path}"
+                        log = f"Moved to Streamline under '{assigned_label}': {file_path}"
                     elif folder_type == 2:
                         target = os.path.join(plan_manager_base, os.path.basename(MANUAL_LODGEMENT_FOLDER))
-                        log = f"Moved to Manual Lodgement: {file_path}"
+                        log = f"Moved to Manual Lodgement under '{assigned_label}': {file_path}"
                     elif folder_type == 3:
                         target = os.path.join(plan_manager_base, os.path.basename(AT_CONSUMABLES_FOLDER))
-                        log = f"Moved to AT&Consumables: {file_path}"
+                        log = f"Moved to AT&Consumables under '{assigned_label}': {file_path}"
                     else:
                         target = os.path.join(plan_manager_base, found_vendor)
-                        log = f"Moved to custom vendor ({found_vendor}) under {plan_manager or 'Unassigned'}: {file_path}"
+                        log = (
+                            f"Moved to custom vendor ({found_vendor}) under '{assigned_label}': {file_path}"
+                        )
                 else:
                     target = os.path.join(plan_manager_base, os.path.basename(NEW_PROVIDER_FOLDER))
-                    log = f"Moved to New Provider (no match) under {plan_manager or 'Unassigned'}: {file_path}"
+                    log = f"Moved to New Provider (no match) under '{assigned_label}': {file_path}"
 
                 dest_path = os.path.join(target, filename)
                 if safe_move(file_path, dest_path, log):
