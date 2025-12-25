@@ -833,11 +833,13 @@ def save_attachments_from_outlook_folder(
         if any(re.search(r"\bService Agreement\b", t, re.IGNORECASE) for t in [subject, body_text]):
             email.Categories = "Service Agreement"
             email.Save()
+            print(f"Service Agreement Found: {subject}")
             continue
 
         if re.search(r"\breminder\b", subject, re.IGNORECASE) or re.search(r"\breminder\b", body_text, re.IGNORECASE):
             email.Categories = "Reminder"
             email.Save()
+            print(f"Reminder Found: {subject}")
             continue
 
         if re.search(r"\bquote\b", subject, re.IGNORECASE) or re.search(r"\bquote\b", body_text, re.IGNORECASE):
@@ -848,16 +850,19 @@ def save_attachments_from_outlook_folder(
         if re.search(r"\bOver-Due\b", subject, re.IGNORECASE) or re.search(r"\bOverdue\b", subject, re.IGNORECASE):
             email.Categories = "Reminder"
             email.Save()
+            print(f"Reminder Found: {subject}")
             continue
 
         if re.search(r"\bStatement\b", subject, re.IGNORECASE) and not re.search(r"\bActivity Statement\b", subject, re.IGNORECASE):
             email.Categories = "Statement"
             email.Save()
+            print(f"Statement Found: {subject}")
             continue
 
         if re.search(r"\bCredit Adj\b", subject, re.IGNORECASE) or re.search(r"\bCredit Adj\b", body_text, re.IGNORECASE):
             email.Categories = "Credit Adj"
             email.Save()
+            print(f"Credit Adj Found: {subject}")
             continue
 
         if "24 Pritchard Street" in subject or "24 Pritchard Street" in body_text:
@@ -881,6 +886,7 @@ def save_attachments_from_outlook_folder(
             if re.search(r"remittance", (attachment.get("name") or ""), re.IGNORECASE):
                 email.Categories = "Remittance"
                 email.Save()
+                print(f"Remittance Found: {subject}")
                 skip_email_due_to_remittance = True
                 break
         if skip_email_due_to_remittance:
